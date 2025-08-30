@@ -1,14 +1,11 @@
 import os
 import json
-import glob
-import math
 import uuid
-import random
 import polars as pl
 
 from pathlib import Path
-from collections import namedtuple
-from typing import Any, Iterable, Optional, Callable
+from datetime import datetime
+from typing import Any, Generator, Optional, Callable, TypeAlias
 
 
 def protect(*protected):
@@ -52,13 +49,14 @@ class Flexmeta:
         self,
         name: str,
         minimum_id: int = 0,
-        schema: Optional[dict[str, pl.DataType]] = None,
+        schema: Optional[dict[str, Any]] = None,
     ):
         name = os.path.basename(name.replace("/", "_").lower())
         self.__id: int = minimum_id
         self.__uniqid: str = str(uuid.uuid5(uuid.NAMESPACE_OID, name))
         self.__schema: Optional[dict[str, pl.DataType]] = schema
-        self.__lines: pl.DataFrame = self.DataFrame([])
+        self.__table: pl.DataFrame = self.DataFrame([])
+        self.__datetime: datetime = datetime.now()
         self.__filename: Path = Path(Flex.StorePath / Path(f"{name}.json"))
 
         if not os.path.isdir(Flex.StorePath):
@@ -77,35 +75,35 @@ class Flexmeta:
         return self.__uniqid
 
     @property
-    def lines(self) -> pl.DataFrame:
-        return self.__lines
+    def table(self) -> pl.DataFrame:
+        return self.__table
 
     @property
     def schema(self) -> Optional[dict[str, pl.DataType]]:
         return self.__schema
 
     def DataFrame(self, data: list[dict[str, Any]]) -> pl.DataFrame:
-        return pl.DataFrame(data, schema=self.__schema, nan_to_null=False)
+        return pl.DataFrame(data, schema_overrides=self.__schema, nan_to_null=False)
 
     def next_id(self) -> int:
         return self.__id + 1
 
     def count(self) -> int:
-        return self.__lines.shape[0]
+        return self.__table.shape[0]
 
     def load(self, id: int) -> Optional[dict[str, Any]]:
-        if not self.__lines.is_empty():
-            for items in self.__lines.filter(pl.col.id == id).to_dicts():
+        if not self.__table.is_empty():
+            for items in self.__table.filter(pl.col.id == id).to_dicts():
                 return items
 
     def append(self, data: dict[str, Any]) -> bool:
-        lines = self.DataFrame([data])
+        table = self.DataFrame([data])
 
         try:
-            if self.__lines.is_empty():
-                self.__lines = lines
+            if self.__table.is_empty():
+                self.__table = table
             else:
-                self.__lines = pl.concat([self.__lines, lines], how="diagonal")
+                self.__table = pl.concat([self.__table, table], how="diagonal")
 
             return self.__save_state()
         except Exception as e:
@@ -113,19 +111,19 @@ class Flexmeta:
             return False
 
     def update(self, data: dict[str, Any]) -> bool:
-        n = self.__lines.shape[0]
-        self.__lines = self.__lines.remove(pl.col.id == data["id"])
+        n = self.__table.shape[0]
+        self.__table = self.__table.remove(pl.col.id == data["id"])
 
-        if n > self.__lines.shape[0]:
+        if n > self.__table.shape[0]:
             return self.append(data)
 
         return False
 
     def delete(self, id: int) -> bool:
-        n = self.__lines.shape[0]
-        self.__lines = self.__lines.remove(pl.col.id == id)
+        n = self.__table.shape[0]
+        self.__table = self.__table.remove(pl.col.id == id)
 
-        if n > self.__lines.shape[0]:
+        if n > self.__table.shape[0]:
             return self.__save_state()
 
         return False
@@ -134,8 +132,9 @@ class Flexmeta:
         try:
             with open(self.__filename, "rb") as handler:
                 data = json.load(handler)
-                self.id = data["id"]
-                self.__lines = self.DataFrame(data["lines"])
+                self.__id = data["id"]
+                self.__datetime = data["datetime"]
+                self.__table = self.DataFrame(data["items"])
             return True
         except Exception as e:
             print("Flexmeta.__load_state:", str(e))
@@ -144,7 +143,14 @@ class Flexmeta:
 
     def __save_state(self) -> bool:
         try:
-            data = json.dumps({"id": self.next_id(), "lines": self.__lines.to_dicts()})
+            self.__datetime = datetime.now()
+            data = json.dumps(
+                {
+                    "id": self.next_id(),
+                    "datetime": self.__datetime,
+                    "items": self.__table.to_dicts(),
+                }
+            )
 
         except Exception as e:
             print("Flexmeta.__save_state:", str(e))
@@ -156,6 +162,9 @@ class Flexmeta:
 
 class Flextable(
     metaclass=protect(
+        "c",
+        "table",
+        "schema",
         "flexmeta",
         "_load",
         "clone",
@@ -172,8 +181,20 @@ class Flextable(
         self.id: int = flexmeta.next_id()
 
     @property
+    def c(self) -> pl.expr.expr.Expr:
+        return pl.col
+
+    @property
     def flexmeta(self) -> Flexmeta:
         return Flex.ConnectionPool[self.__flexmeta_uniqid__]
+
+    @property
+    def table(self) -> pl.DataFrame:
+        return self.flexmeta.table
+
+    @property
+    def schema(self) -> Optional[dict[str, pl.DataType]]:
+        return self.flexmeta.schema
 
     @staticmethod
     def _load(flextable: "Flextable", id: int) -> Optional["Flextable"]:
@@ -232,64 +253,45 @@ class Flextable(
 
         return json.dumps(self.to_dict(), indent=indent, default=default)
 
-    def select(self) -> "Flextable.Flexselect":
-        return Flextable.Flexselect(self, self.flexmeta.lines)
+    def select(self, table: pl.DataFrame) -> "Flextable.Flexselect":
+        return Flextable.Flexselect(table, self)
 
     class Flexselect:
-        def __init__(self, flextable: "Flextable", lines: pl.DataFrame):
-            self.__lines: pl.DataFrame = lines
+        Callback: TypeAlias = Optional[Callable[["Flextable"], "Flextable"]]
+
+        def __init__(self, table: pl.DataFrame, flextable: "Flextable"):
+            self.__items: list[dict[str, Any]] = table.to_dicts()
             self.__flextable: Flextable = flextable
 
-        def __getattr__(self, name: str) -> pl.Expr:
-            return pl.col(name)
-
-        def __getitem__(self, name: str) -> pl.Expr:
-            return pl.col(name)
-
-        def __call__(self) -> pl.DataFrame:
-            return self.__lines
-
         def __len__(self) -> int:
-            return self.count()
+            return len(self.__items)
 
-        def __iter__(self):
-            for item in self.__lines.iter_rows(named=True):
-                yield item
-
-        def empty(self):
-            self.__lines.clear()
+        def __iter__(self) -> Generator["Flextable", Any, None]:
+            for item in self.__items:
+                yield self.__flextable.clone(item)
 
         def count(self) -> int:
-            return self.__lines.shape[0]
+            return len(self.__items)
 
-        def distinct(self, *args, **kwords):
-            self.__lines = self.__lines.unique(args or kwords)
+        def fetch_one(self, callback: Callback = None) -> Optional["Flextable"]:
+            for item in self.__items:
+                if callable(callback):
+                    return callback(self.__flextable.clone(item))
 
-        def map(self, *args, **kwords):
-            self.__lines = self.__lines.map_rows(args or kwords)  # type: ignore
-
-        def where(self, *args, **kwords):
-            self.__lines = self.__lines.filter(args or kwords)
-
-        def sort(self, *args, **kwords):
-            self.__lines = self.__lines.sort(args or kwords)
-
-        def fetch_one(self) -> Optional["Flextable"]:
-            for item in self.__lines.to_dicts():
                 return self.__flextable.clone(item)
 
         def fetch_all(
-            self, page: int = -1, limit: int = 10, callback: Optional[Callable] = None
+            self, page: int = -1, limit: int = 10, callback: Callback = None
         ) -> list["Flextable"]:
-            lines = self.__lines.to_dicts()
-
-            if page > 1 and limit > 1:
+            if page < 1 or limit < 1:
+                items = self.__items
+            else:
                 paging = abs((page * limit) - limit)
-                lines = lines[paging : paging + limit]
+                items = self.__items[paging : paging + limit]
 
-            lines = list(map(self.__flextable.clone, lines))
+            items = list(map(self.__flextable.clone, items))
 
             if callable(callback):
-                return list(map(callback, lines))
+                return list(map(callback, items))
 
-            return lines
+            return items

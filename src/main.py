@@ -1,8 +1,7 @@
 import json
 
 from typing import cast, Optional
-from app.flex import Flexmeta, Flextable
-from datetime import datetime
+from app.flex import Flexmeta, Flextable, pl
 
 
 class Profile(Flextable):
@@ -15,31 +14,31 @@ class Profile(Flextable):
         self.email: str = ""
         self.coordinates: dict = {}
         self.pictures: list[str] = []
-        self.dob: int = int(datetime.now().timestamp())
+        self.date: pl.Datetime = pl.Datetime()
 
     @staticmethod
     def load(id: int) -> Optional["Profile"]:
         return cast(Profile, Flextable._load(Profile(), id))
 
 
-# with open("/app/src/temp_data/users.json", "rb") as handle:
-#     data = json.load(handle)
+with open("/app/src/temp_data/users.json", "rb") as handle:
+    data = json.load(handle)
 
-#     for item in data["results"]:
-#         profile = Profile()
-#         profile.gender = item["gender"]
-#         profile.name = f"{item['name']['first']} {item['name']['last']}"
-#         profile.city = item["location"]["city"]
-#         profile.state = item["location"]["state"]
-#         profile.email = item["email"]
-#         # profile.pictures = item["picture"]
-#         profile.coordinates = item["location"]["coordinates"]
-#         profile.dob = int(datetime.fromisoformat(item["dob"]["date"]).timestamp())
+    for item in data["results"]:
+        profile = Profile()
+        profile.gender = item["gender"]
+        profile.name = f"{item['name']['first']} {item['name']['last']}"
+        profile.city = item["location"]["city"]
+        profile.state = item["location"]["state"]
+        profile.email = item["email"]
+        profile.pictures = item["picture"]
+        profile.coordinates = item["location"]["coordinates"]
 
-#         print(profile.id, profile.commit())
+        print(profile.id, profile.commit())
 
 profile = Profile()
-select = profile.select()
 
-select().filter(select.id.is_between(1010, 1020))
-print(select.fetch_all(callback=lambda x: x.to_dict()))
+for item in profile.select(
+    profile.table.filter(profile.c.id > 1040).sort("name", descending=True)
+).fetch_all(1, 10):
+    print(item.to_json())
