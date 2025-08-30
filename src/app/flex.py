@@ -29,8 +29,8 @@ def protect(*protected):
 
 
 class Flex(object):
-    StorePath: Path = Path("/app/src/flexstore")
-    ConnectionPool: dict[str, "Flexmeta"] = {}
+    FLEXSTORE_PATH: Path = Path("/app/src/flexstore")
+    REGISTERED_INSTANCES: dict[str, "Flexmeta"] = {}
 
     def __init__(self, attributes: dict = {}):
         for k, v in attributes.items():
@@ -41,7 +41,7 @@ class Flex(object):
 
     @staticmethod
     def load(uniqid: str) -> "Flexmeta":
-        return Flex.ConnectionPool[uniqid]
+        return Flex.REGISTERED_INSTANCES[uniqid]
 
 
 class Flexmeta:
@@ -52,41 +52,52 @@ class Flexmeta:
         schema: Optional[dict[str, Any]] = None,
     ):
         name = os.path.basename(name.replace("/", "_").lower())
-        self.__id: int = minimum_id
         self.__uniqid: str = str(uuid.uuid5(uuid.NAMESPACE_OID, name))
-        self.__schema: Optional[dict[str, pl.DataType]] = schema
+        self.__metadata: dict[str, Any] = {
+            "id": minimum_id,
+            "count": 0,
+            "datetime": datetime.now().isoformat(),
+        }
+        self.__schema: Optional[dict[str, Any]] = schema
         self.__table: pl.DataFrame = self.DataFrame([])
-        self.__datetime: datetime = datetime.now()
-        self.__filename: Path = Path(Flex.StorePath / Path(f"{name}.json"))
+        self.__filename: Path = Path(Flex.FLEXSTORE_PATH / Path(f"{name}.json"))
 
-        if not os.path.isdir(Flex.StorePath):
+        if not os.path.isdir(Flex.FLEXSTORE_PATH):
             os.umask(0)
-            os.makedirs(Flex.StorePath, mode=0o777, exist_ok=True)
+            os.makedirs(Flex.FLEXSTORE_PATH, mode=0o777, exist_ok=True)
 
         if os.path.exists(self.__filename):
             self.__load_state()
         else:
             self.__save_state()
 
-        Flex.ConnectionPool[self.__uniqid] = self
+        Flex.REGISTERED_INSTANCES[self.__uniqid] = self
 
     @property
     def uniqid(self) -> str:
         return self.__uniqid
 
     @property
+    def metadata(self) -> dict[str, Any]:
+        return self.__metadata
+
+    @property
     def table(self) -> pl.DataFrame:
         return self.__table
 
     @property
-    def schema(self) -> Optional[dict[str, pl.DataType]]:
+    def schema(self) -> Optional[dict[str, Any]]:
         return self.__schema
 
     def DataFrame(self, data: list[dict[str, Any]]) -> pl.DataFrame:
-        return pl.DataFrame(data, schema_overrides=self.__schema, nan_to_null=False)
+        return pl.DataFrame(
+            data,
+            schema_overrides=self.__schema,
+            nan_to_null=False,
+        )
 
     def next_id(self) -> int:
-        return self.__id + 1
+        return self.__metadata["id"] + 1
 
     def count(self) -> int:
         return self.__table.shape[0]
@@ -111,6 +122,9 @@ class Flexmeta:
             return False
 
     def update(self, data: dict[str, Any]) -> bool:
+        if self.__table.is_empty():
+            return False
+        
         n = self.__table.shape[0]
         self.__table = self.__table.remove(pl.col.id == data["id"])
 
@@ -120,6 +134,9 @@ class Flexmeta:
         return False
 
     def delete(self, id: int) -> bool:
+        if self.__table.is_empty():
+            return False
+
         n = self.__table.shape[0]
         self.__table = self.__table.remove(pl.col.id == id)
 
@@ -132,8 +149,7 @@ class Flexmeta:
         try:
             with open(self.__filename, "rb") as handler:
                 data = json.load(handler)
-                self.__id = data["id"]
-                self.__datetime = data["datetime"]
+                self.__metadata = data["metadata"]
                 self.__table = self.DataFrame(data["items"])
             return True
         except Exception as e:
@@ -143,15 +159,16 @@ class Flexmeta:
 
     def __save_state(self) -> bool:
         try:
-            self.__datetime = datetime.now()
             data = json.dumps(
                 {
-                    "id": self.next_id(),
-                    "datetime": self.__datetime,
+                    "metadata": {
+                        "id": self.next_id(),
+                        "count": self.count(),
+                        "datetime": datetime.now().isoformat(),
+                    },
                     "items": self.__table.to_dicts(),
                 }
             )
-
         except Exception as e:
             print("Flexmeta.__save_state:", str(e))
             return False
@@ -186,20 +203,20 @@ class Flextable(
 
     @property
     def flexmeta(self) -> Flexmeta:
-        return Flex.ConnectionPool[self.__flexmeta_uniqid__]
+        return Flex.load(self.__flexmeta_uniqid__)
 
     @property
     def table(self) -> pl.DataFrame:
         return self.flexmeta.table
 
     @property
-    def schema(self) -> Optional[dict[str, pl.DataType]]:
+    def schema(self) -> Optional[dict[str, Any]]:
         return self.flexmeta.schema
 
     @staticmethod
     def _load(flextable: "Flextable", id: int) -> Optional["Flextable"]:
         if items := flextable.flexmeta.load(id):
-            return flextable.update(items)
+            return flextable.clone(items, flextable)
 
     @staticmethod
     def load(id: int) -> Optional["Flextable"]:
@@ -207,33 +224,37 @@ class Flextable(
             'Static method "load(id: int) -> Optional["Flextable"]" is not yet implemented!'
         )
 
-    def clone(self, items: dict[str, Any] = {}) -> "Flextable":
-        flextable = type(self)()  # type: ignore
+    def on_compose(self, name: str, value: Any) -> Any:
+        return value
+
+    def clone(
+        self, items: dict[str, Any] = {}, flextable: Optional["Flextable"] = None
+    ) -> "Flextable":
+        if not flextable:
+            flextable = type(self)()  # type: ignore
 
         if items and isinstance(items, dict):
-            return flextable.update(items)
+            for k, v in [(k, v) for k, v in self.__dict__.items() if k in items]:
+                if isinstance(v, Flextable) and v != self:
+                    setattr(flextable, k, v.clone(items[k]))
+                else:
+                    setattr(flextable, k, flextable.on_compose(k, items[k]))
 
         return flextable
 
     def commit(self) -> bool:
         if self.flexmeta.load(self.id):
-            return self.flexmeta.update(self.to_dict())
+            return self.flexmeta.update(self.to_dict(decompose=True))
 
-        return self.flexmeta.append(self.to_dict())
+        return self.flexmeta.append(self.to_dict(decompose=True))
 
     def delete(self) -> bool:
         return self.flexmeta.delete(self.id)
 
-    def update(self, items: dict[str, Any]) -> "Flextable":
-        for k, v in [(k, v) for k, v in self.__dict__.items() if k in items]:
-            if isinstance(v, Flextable) and v != self:
-                setattr(self, k, v.update(items[k]))
-            else:
-                setattr(self, k, items[k])
+    def on_decompose(self, name: str, value: Any) -> Any:
+        return value
 
-        return self
-
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, decompose: bool = False) -> dict[str, Any]:
         items: dict[str, Any] = {}
 
         for k, v in self.__dict__.items():
@@ -242,16 +263,13 @@ class Flextable(
             else:
                 items[k] = v
 
+        if decompose:
+            items = {k: self.on_decompose(k, v) for k, v in self.to_dict().items()}
+
         return items
 
     def to_json(self, indent: Optional[int] = 4) -> str:
-        def default(o: Any) -> Any:
-            try:
-                return o.__dict__
-            except Exception:
-                return str(o)
-
-        return json.dumps(self.to_dict(), indent=indent, default=default)
+        return json.dumps(self.to_dict(decompose=True), indent=indent)
 
     def select(self, table: pl.DataFrame) -> "Flextable.Flexselect":
         return Flextable.Flexselect(table, self)
