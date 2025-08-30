@@ -158,7 +158,6 @@ class Flexmeta:
         return False
 
     def __load_state(self) -> bool:
-        print(1)
         try:
             with open(self.__filename, "rb") as handler:
                 data = json.load(handler)
