@@ -39,10 +39,6 @@ class Flex(object):
             else:
                 setattr(self, k, Flex(v) if isinstance(v, dict) else v)
 
-    @staticmethod
-    def load(uniqid: str) -> "Flexmeta":
-        return Flex.REGISTERED_INSTANCES[uniqid]
-
 
 class Flexmeta:
     def __init__(
@@ -66,10 +62,15 @@ class Flexmeta:
             os.umask(0)
             os.makedirs(Flex.FLEXSTORE_PATH, mode=0o777, exist_ok=True)
 
-        if os.path.exists(self.__filename):
-            self.__load_state()
+        if self.__uniqid in Flex.REGISTERED_INSTANCES:
+            flexmeta = Flex.REGISTERED_INSTANCES[self.__uniqid]
+            self.__metadata = flexmeta.content["metadata"]
+            self.__table = self.DataFrame(flexmeta.content["items"])
         else:
-            self.__save_state()
+            if os.path.exists(self.__filename):
+                self.__load_state()
+            else:
+                self.__save_state()
 
         Flex.REGISTERED_INSTANCES[self.__uniqid] = self
 
@@ -88,6 +89,17 @@ class Flexmeta:
     @property
     def schema(self) -> Optional[dict[str, Any]]:
         return self.__schema
+
+    @property
+    def content(self) -> dict[str, Any]:
+        return {
+            "metadata": {
+                "id": self.next_id(),
+                "count": self.count(),
+                "datetime": datetime.now().isoformat(),
+            },
+            "items": self.__table.to_dicts(),
+        }
 
     def DataFrame(self, data: list[dict[str, Any]]) -> pl.DataFrame:
         return pl.DataFrame(
@@ -124,7 +136,7 @@ class Flexmeta:
     def update(self, data: dict[str, Any]) -> bool:
         if self.__table.is_empty():
             return False
-        
+
         n = self.__table.shape[0]
         self.__table = self.__table.remove(pl.col.id == data["id"])
 
@@ -146,6 +158,7 @@ class Flexmeta:
         return False
 
     def __load_state(self) -> bool:
+        print(1)
         try:
             with open(self.__filename, "rb") as handler:
                 data = json.load(handler)
@@ -159,16 +172,7 @@ class Flexmeta:
 
     def __save_state(self) -> bool:
         try:
-            data = json.dumps(
-                {
-                    "metadata": {
-                        "id": self.next_id(),
-                        "count": self.count(),
-                        "datetime": datetime.now().isoformat(),
-                    },
-                    "items": self.__table.to_dicts(),
-                }
-            )
+            data = json.dumps(self.content)
         except Exception as e:
             print("Flexmeta.__save_state:", str(e))
             return False
@@ -203,7 +207,7 @@ class Flextable(
 
     @property
     def flexmeta(self) -> Flexmeta:
-        return Flex.load(self.__flexmeta_uniqid__)
+        return Flex.REGISTERED_INSTANCES[self.__flexmeta_uniqid__]
 
     @property
     def table(self) -> pl.DataFrame:
@@ -290,6 +294,9 @@ class Flextable(
 
         def count(self) -> int:
             return len(self.__items)
+
+        def map(self, callback: Callable[[dict[str, Any]], dict[str, Any]]):
+            self.__items = list(map(callback, self.__items))
 
         def fetch_one(self, callback: Callback = None) -> Optional["Flextable"]:
             for item in self.__items:

@@ -34,24 +34,23 @@ class Profile(Flextable):
         return value
 
 
-with open("/app/src/temp_data/users.json", "rb") as handle:
-    data = json.load(handle)
+# with open("/app/src/temp_data/users.json", "rb") as handle:
+#     data = json.load(handle)
 
-    for item in data["results"]:
-        profile = Profile()
-        profile.gender = item["gender"]
-        profile.name = f"{item['name']['first']} {item['name']['last']}"
-        profile.city = item["location"]["city"]
-        # profile.state = item["location"]["state"]
-        profile.email = item["email"]
-        profile.pictures = item["picture"]
-        profile.coordinates = item["location"]["coordinates"]
-
-        print(profile.id, profile.commit())
+#     for item in data["results"]:
+#         profile = Profile()
+#         profile.gender = item["gender"]
+#         profile.name = f"{item['name']['first']} {item['name']['last']}"
+#         profile.city = item["location"]["city"]
+#         # profile.state = item["location"]["state"]
+#         profile.email = item["email"]
+#         profile.pictures = item["picture"]
+#         profile.coordinates = item["location"]["coordinates"]
+#         profile.commit()
 
 profile = Profile()
 
-for item in profile.select(
-    profile.table.filter(profile.c.id > 1040).sort("name", descending=True)
-).fetch_all(1, 10):
-    print(item)
+select = profile.select(
+    profile.table.filter(profile.c.name.str.starts_with("Jo")).sort("name", descending=True)
+)
+print(select.count())
