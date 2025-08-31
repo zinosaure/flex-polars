@@ -1,8 +1,13 @@
+import sys
 import json
 
+sys.path.append("../src/")
+
 from typing import cast, Optional, Any
-from ..src.flex import Flex
+from flex import Flex
 from datetime import datetime
+
+Flex.FLEXSTORE_PATH = "/app/tests/flexstore"
 
 
 class Contact(Flex.Flexobject):
@@ -39,24 +44,24 @@ class Profile(Flex.Flextable):
 
         return super().on_decompose(name, value)
 
-# with open("/app/src/temp_data/users.json", "rb") as handle:
-#     data = json.load(handle)
-#     commits = []
 
-#     for item in data["results"]:
-#         profile = Profile()
-#         profile.gender = item["gender"]
-#         profile.name = f"{item['name']['first']} {item['name']['last']}"
-#         profile.city = item["location"]["city"]
-#         profile.email = item["email"]
-#         profile.pictures = item["picture"]
-#         profile.coordinates = item["location"]["coordinates"]
-#         commits.append(profile)
+with open("/app/tests/temp_data/users.json", "rb") as handle:
+    data = json.load(handle)
+    commits = []
 
-#     Profile.batch_commit(commits)
+    for item in data["results"]:
+        profile = Profile()
+        profile.gender = item["gender"]
+        profile.name = f"{item['name']['first']} {item['name']['last']}"
+        profile.city = item["location"]["city"]
+        profile.email = item["email"]
+        profile.pictures = item["picture"]
+        profile.coordinates = item["location"]["coordinates"]
+        commits.append(profile)
+
+    Profile.batch_commit(commits)
 
 profile = Profile()
-
 
 
 def x(table: Flex.Flextable.DataFrame) -> Flex.Flextable.DataFrame:
