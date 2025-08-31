@@ -8,13 +8,12 @@ from datetime import datetime
 class Contact(Flex.Flexobject):
     def __init__(self) -> None:
         self.cell: str = "+33 06 25 35 55 33"
-        self.phone: str = "+33 01 85 99 36 64"
         self.smartphone: bool = False
 
 
 class Profile(Flex.Flextable):
     def __init__(self):
-        super().__init__(Flex.Flexmeta("profiles", 1000, {"contact": Flex.Pl.Object}))
+        super().__init__(Flex.Flexmeta("profiles", 1000))
         self.gender: str = ""
         self.name: str = ""
         self.city: str = ""
@@ -59,6 +58,7 @@ class Profile(Flex.Flextable):
 profile = Profile()
 
 
+
 def x(table: Flex.Flextable.DataFrame) -> Flex.Flextable.DataFrame:
     # table = table.filter(profile.c.name.str.starts_with("Jo"))
     table = table.sort("id", descending=True)
@@ -67,4 +67,4 @@ def x(table: Flex.Flextable.DataFrame) -> Flex.Flextable.DataFrame:
 
 
 for v in profile.select(x).tail(5):
-    print(v.name)
+    print(v.to_json())

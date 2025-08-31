@@ -94,6 +94,7 @@ class Flexmeta:
             data,
             schema_overrides=self.__schema,
             nan_to_null=False,
+            strict=False,
         )
 
     def next_id(self) -> int:
@@ -318,7 +319,7 @@ class Flexselect:
     def map(self, callback: Callable[[dict[str, Any]], dict[str, Any]]):
         self.__items = list(map(callback, self.__items))
 
-    def top(self, limit: int = 10, callback: Callback = None) -> list[Flextable]:
+    def head(self, limit: int = 10, callback: Callback = None) -> list[Flextable]:
         items = self.__items[0:limit]
         items = list(map(self.__flextable.clone, items))
 
