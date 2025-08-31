@@ -28,18 +28,6 @@ def protect(*protected):
     return Protect
 
 
-class Flex(object):
-    FLEXSTORE_PATH: Path = Path("/app/src/flexstore")
-    REGISTERED_INSTANCES: dict[str, "Flexmeta"] = {}
-
-    def __init__(self, attributes: dict = {}):
-        for k, v in attributes.items():
-            if isinstance(v, (list, tuple)):
-                setattr(self, k, [Flex(x) if isinstance(x, dict) else x for x in v])
-            else:
-                setattr(self, k, Flex(v) if isinstance(v, dict) else v)
-
-
 class Flexmeta:
     def __init__(
         self,
@@ -62,8 +50,8 @@ class Flexmeta:
             os.umask(0)
             os.makedirs(Flex.FLEXSTORE_PATH, mode=0o777, exist_ok=True)
 
-        if self.__uniqid in Flex.REGISTERED_INSTANCES:
-            flexmeta = Flex.REGISTERED_INSTANCES[self.__uniqid]
+        if self.__uniqid in Flex.REGISTERED_FLEXMETA:
+            flexmeta = Flex.REGISTERED_FLEXMETA[self.__uniqid]
             self.__metadata = flexmeta.content["metadata"]
             self.__table = self.DataFrame(flexmeta.content["items"])
         else:
@@ -72,7 +60,7 @@ class Flexmeta:
             else:
                 self.__save_state()
 
-        Flex.REGISTERED_INSTANCES[self.__uniqid] = self
+        Flex.REGISTERED_FLEXMETA[self.__uniqid] = self
 
     @property
     def uniqid(self) -> str:
@@ -84,7 +72,7 @@ class Flexmeta:
 
     @property
     def table(self) -> pl.DataFrame:
-        return self.__table
+        return self.__table.clone()
 
     @property
     def schema(self) -> Optional[dict[str, Any]]:
@@ -116,41 +104,36 @@ class Flexmeta:
 
     def load(self, id: int) -> Optional[dict[str, Any]]:
         if not self.__table.is_empty():
-            for items in self.__table.filter(pl.col.id == id).to_dicts():
-                return items
+            for props in self.__table.filter(pl.col.id == id).to_dicts():
+                return props
 
-    def append(self, data: dict[str, Any]) -> bool:
-        table = self.DataFrame([data])
+    def update(self, values: dict[str, Any] | list[dict[str, Any]]) -> bool:
+        if isinstance(values, list):
+            table = self.DataFrame(values)
+        else:
+            table = self.DataFrame([values])
 
         try:
-            if self.__table.is_empty():
-                self.__table = table
-            else:
-                self.__table = pl.concat([self.__table, table], how="diagonal")
+            self.__table = pl.concat([self.__table, table], how="diagonal")
+            self.__table = self.__table.unique(
+                subset=["id"], keep="last", maintain_order=True
+            )
 
             return self.__save_state()
         except Exception as e:
             print("Flexmeta.append:", str(e))
             return False
 
-    def update(self, data: dict[str, Any]) -> bool:
+    def delete(self, ident: int | list[int]) -> bool:
         if self.__table.is_empty():
             return False
 
         n = self.__table.shape[0]
-        self.__table = self.__table.remove(pl.col.id == data["id"])
 
-        if n > self.__table.shape[0]:
-            return self.append(data)
-
-        return False
-
-    def delete(self, id: int) -> bool:
-        if self.__table.is_empty():
-            return False
-
-        n = self.__table.shape[0]
-        self.__table = self.__table.remove(pl.col.id == id)
+        if not isinstance(ident, list):
+            self.__table = self.__table.remove(pl.col.id == ident)
+        else:
+            self.__table = self.__table.remove(pl.col.id.is_in(ident))
 
         if n > self.__table.shape[0]:
             return self.__save_state()
@@ -177,36 +160,50 @@ class Flexmeta:
             return False
 
         with open(self.__filename, "w+") as handler:
-            return handler.write(data) >= 0
+            return handler.write(data) > 0
 
 
-class Flextable(
-    metaclass=protect(
-        "c",
-        "table",
-        "schema",
-        "flexmeta",
-        "_load",
-        "clone",
-        "commit",
-        "delete",
-        "update",
-        "to_dict",
-        "to_json",
-        "select",
-    ),
-):
+protected_methods = [
+    "uniqid",
+    "c",
+    "column",
+    "table",
+    "schema",
+    "flexmeta",
+    "_load",
+    "batch_commit",
+    "batch_delete",
+    "clone",
+    "select",
+    "commit",
+    "delete",
+    "to_dict",
+    "to_json",
+]
+
+
+class Flextable(metaclass=protect(*protected_methods)):
+    DataFrame: TypeAlias = pl.DataFrame
+
     def __init__(self, flexmeta: Flexmeta):
         self.__flexmeta_uniqid__: str = flexmeta.uniqid
         self.id: int = flexmeta.next_id()
 
     @property
-    def c(self) -> pl.expr.expr.Expr:
+    def uniqid(self) -> str:
+        return self.__flexmeta_uniqid__
+
+    @property
+    def c(self) -> pl.expr.Expr:
+        return pl.col
+
+    @property
+    def column(self) -> pl.expr.Expr:
         return pl.col
 
     @property
     def flexmeta(self) -> Flexmeta:
-        return Flex.REGISTERED_INSTANCES[self.__flexmeta_uniqid__]
+        return Flex.REGISTERED_FLEXMETA[self.__flexmeta_uniqid__]
 
     @property
     def table(self) -> pl.DataFrame:
@@ -218,8 +215,8 @@ class Flextable(
 
     @staticmethod
     def _load(flextable: "Flextable", id: int) -> Optional["Flextable"]:
-        if items := flextable.flexmeta.load(id):
-            return flextable.clone(items, flextable)
+        if props := flextable.flexmeta.load(id):
+            return flextable.clone(props, flextable)
 
     @staticmethod
     def load(id: int) -> Optional["Flextable"]:
@@ -227,95 +224,166 @@ class Flextable(
             'Static method "load(id: int) -> Optional["Flextable"]" is not yet implemented!'
         )
 
-    def on_compose(self, name: str, value: Any) -> Any:
-        return value
+    @staticmethod
+    def batch_commit(data: list["Flextable"]) -> bool:
+        if not len(data):
+            return False
+
+        return data[0].flexmeta.update(
+            [flextable.to_dict(decompose=True) for flextable in data]
+        )
+
+    @staticmethod
+    def batch_delete(data: list["Flextable"]) -> bool:
+        if not len(data):
+            return False
+
+        return data[0].flexmeta.delete([flextable.id for flextable in data])
 
     def clone(
-        self, items: dict[str, Any] = {}, flextable: Optional["Flextable"] = None
+        self, props: dict[str, Any] = {}, flextable: Optional["Flextable"] = None
     ) -> "Flextable":
         if not flextable:
             flextable = type(self)()  # type: ignore
 
-        if items and isinstance(items, dict):
-            for k, v in [(k, v) for k, v in self.__dict__.items() if k in items]:
+        if props and isinstance(props, dict):
+            for k, v in [(k, v) for k, v in self.__dict__.items() if k in props]:
+                if k == "__flexmeta_uniqid__":
+                    continue
+
                 if isinstance(v, Flextable) and v != self:
-                    setattr(flextable, k, v.clone(items[k]))
+                    setattr(flextable, k, v.clone(props[k]))
                 else:
-                    setattr(flextable, k, flextable.on_compose(k, items[k]))
+                    setattr(flextable, k, flextable.on_compose(k, props[k]))
 
         return flextable
 
-    def commit(self) -> bool:
-        if self.flexmeta.load(self.id):
-            return self.flexmeta.update(self.to_dict(decompose=True))
+    def select(self, callback: Callable[[DataFrame], DataFrame]) -> "Flexselect":
+        return Flexselect(callback(self.table), self)
 
-        return self.flexmeta.append(self.to_dict(decompose=True))
+    def commit(self) -> bool:
+        return self.flexmeta.update(self.to_dict(decompose=True))
 
     def delete(self) -> bool:
         return self.flexmeta.delete(self.id)
 
-    def on_decompose(self, name: str, value: Any) -> Any:
-        return value
-
     def to_dict(self, decompose: bool = False) -> dict[str, Any]:
-        items: dict[str, Any] = {}
+        props: dict[str, Any] = {}
 
         for k, v in self.__dict__.items():
+            if k == "__flexmeta_uniqid__":
+                continue
+
             if isinstance(v, Flextable) and v != self:
-                items[k] = v.to_dict()
+                props[k] = v.to_dict(decompose)
+            elif hasattr(v, "to_dict") and callable(getattr(v, "to_dict")):
+                props[k] = v.to_dict()
+            elif hasattr(v, "__dict__") and v != self:
+                props[k] = v.__dict__
             else:
-                items[k] = v
+                props[k] = v
 
         if decompose:
-            items = {k: self.on_decompose(k, v) for k, v in self.to_dict().items()}
+            props = {k: self.on_decompose(k, v) for k, v in props.items()}
 
-        return items
+        return props
 
     def to_json(self, indent: Optional[int] = 4) -> str:
         return json.dumps(self.to_dict(decompose=True), indent=indent)
 
-    def select(self, table: pl.DataFrame) -> "Flextable.Flexselect":
-        return Flextable.Flexselect(table, self)
+    def on_compose(self, name: str, value: Any) -> Any:
+        return value
 
-    class Flexselect:
-        Callback: TypeAlias = Optional[Callable[["Flextable"], "Flextable"]]
+    def on_decompose(self, name: str, value: Any) -> Any:
+        return value
 
-        def __init__(self, table: pl.DataFrame, flextable: "Flextable"):
-            self.__items: list[dict[str, Any]] = table.to_dicts()
-            self.__flextable: Flextable = flextable
 
-        def __len__(self) -> int:
-            return len(self.__items)
+class Flexselect:
+    Callback: TypeAlias = Optional[Callable[[Flextable], Flextable]]
 
-        def __iter__(self) -> Generator["Flextable", Any, None]:
-            for item in self.__items:
-                yield self.__flextable.clone(item)
+    def __init__(self, table: pl.DataFrame, flextable: Flextable):
+        self.__items: list[dict[str, Any]] = table.to_dicts()
+        self.__flextable: Flextable = flextable
 
-        def count(self) -> int:
-            return len(self.__items)
+    def __len__(self) -> int:
+        return len(self.__items)
 
-        def map(self, callback: Callable[[dict[str, Any]], dict[str, Any]]):
-            self.__items = list(map(callback, self.__items))
+    def __iter__(self) -> Generator[Flextable, Any, None]:
+        for item in self.__items:
+            yield self.__flextable.clone(item)
 
-        def fetch_one(self, callback: Callback = None) -> Optional["Flextable"]:
-            for item in self.__items:
-                if callable(callback):
-                    return callback(self.__flextable.clone(item))
+    def count(self) -> int:
+        return len(self.__items)
 
-                return self.__flextable.clone(item)
+    def map(self, callback: Callable[[dict[str, Any]], dict[str, Any]]):
+        self.__items = list(map(callback, self.__items))
 
-        def fetch_all(
-            self, page: int = -1, limit: int = 10, callback: Callback = None
-        ) -> list["Flextable"]:
-            if page < 1 or limit < 1:
-                items = self.__items
-            else:
-                paging = abs((page * limit) - limit)
-                items = self.__items[paging : paging + limit]
+    def top(self, limit: int = 10, callback: Callback = None) -> list[Flextable]:
+        items = self.__items[0:limit]
+        items = list(map(self.__flextable.clone, items))
 
-            items = list(map(self.__flextable.clone, items))
+        if callable(callback):
+            return list(map(callback, items))
 
+        return items
+
+    def tail(self, limit: int = 10, callback: Callback = None) -> list[Flextable]:
+        items = self.__items[-limit:]
+        items = list(map(self.__flextable.clone, items))
+
+        if callable(callback):
+            return list(map(callback, items))
+
+        return items
+
+    def fetch_one(self, callback: Callback = None) -> Optional[Flextable]:
+        for item in self.__items:
             if callable(callback):
-                return list(map(callback, items))
+                return callback(self.__flextable.clone(item))
 
-            return items
+            return self.__flextable.clone(item)
+
+    def fetch_all(
+        self, page: int = -1, limit: int = 10, callback: Callback = None
+    ) -> list[Flextable]:
+        if page < 1 or limit < 1:
+            items = self.__items
+        else:
+            paging = abs((page * limit) - limit)
+            items = self.__items[paging : paging + limit]
+
+        items = list(map(self.__flextable.clone, items))
+
+        if callable(callback):
+            return list(map(callback, items))
+
+        return items
+
+
+class Flex(object):
+    FLEXSTORE_PATH: Path = Path("/app/src/flexstore")
+    REGISTERED_FLEXMETA: dict[str, "Flexmeta"] = {}
+
+    Pl: TypeAlias = pl
+    DataFrame: TypeAlias = pl.DataFrame
+
+    class Flexobject:
+        def __init__(self, attributes: dict[str, Any] = {}):
+            for k, v in attributes.items():
+                if isinstance(v, (list, tuple)):
+                    setattr(
+                        self,
+                        k,
+                        [Flex.Flexobject(x) if isinstance(x, dict) else x for x in v],
+                    )
+                else:
+                    setattr(self, k, Flex.Flexobject(v) if isinstance(v, dict) else v)
+
+    class Flexmeta(Flexmeta):
+        pass
+
+    class Flextable(Flextable):
+        pass
+
+    class Flexselect(Flexselect):
+        pass

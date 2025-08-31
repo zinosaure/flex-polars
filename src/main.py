@@ -1,25 +1,32 @@
 import json
 
 from typing import cast, Optional, Any
-from app.flex import Flexmeta, Flextable
+from app.flex import Flex
 from datetime import datetime
 
 
-class Profile(Flextable):
+class Contact(Flex.Flexobject):
+    def __init__(self) -> None:
+        self.cell: str = "+33 06 25 35 55 33"
+        self.phone: str = "+33 01 85 99 36 64"
+        self.smartphone: bool = False
+
+
+class Profile(Flex.Flextable):
     def __init__(self):
-        super().__init__(Flexmeta("profiles", 1000))
+        super().__init__(Flex.Flexmeta("profiles", 1000, {"contact": Flex.Pl.Object}))
         self.gender: str = ""
         self.name: str = ""
         self.city: str = ""
-        # self.state: str = ""
         self.email: str = ""
         self.coordinates: dict = {}
         self.pictures: list[str] = []
         self.date: datetime = datetime.now()
+        self.contact: Contact = Contact()
 
     @staticmethod
     def load(id: int) -> Optional["Profile"]:
-        return cast(Profile, Flextable._load(Profile(), id))
+        return cast(Profile, Flex.Flextable._load(Profile(), id))
 
     def on_compose(self, name: str, value: Any) -> Any:
         if value and name == "date" and isinstance(value, str):
@@ -31,26 +38,33 @@ class Profile(Flextable):
         if value and name == "date" and isinstance(value, datetime):
             return value.isoformat()
 
-        return value
-
+        return super().on_decompose(name, value)
 
 # with open("/app/src/temp_data/users.json", "rb") as handle:
 #     data = json.load(handle)
+#     commits = []
 
 #     for item in data["results"]:
 #         profile = Profile()
 #         profile.gender = item["gender"]
 #         profile.name = f"{item['name']['first']} {item['name']['last']}"
 #         profile.city = item["location"]["city"]
-#         # profile.state = item["location"]["state"]
 #         profile.email = item["email"]
 #         profile.pictures = item["picture"]
 #         profile.coordinates = item["location"]["coordinates"]
-#         profile.commit()
+#         commits.append(profile)
+
+#     Profile.batch_commit(commits)
 
 profile = Profile()
 
-select = profile.select(
-    profile.table.filter(profile.c.name.str.starts_with("Jo")).sort("name", descending=True)
-)
-print(select.count())
+
+def x(table: Flex.Flextable.DataFrame) -> Flex.Flextable.DataFrame:
+    # table = table.filter(profile.c.name.str.starts_with("Jo"))
+    table = table.sort("id", descending=True)
+
+    return table
+
+
+for v in profile.select(x).tail(5):
+    print(v.name)
