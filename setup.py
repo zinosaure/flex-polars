@@ -1,7 +1,7 @@
 from setuptools import setup
 
 setup(
-    name="Flex/Polars",
+    name="flex",
     version="0.1.0",
     url="https://github.com/zinosaure/flex-polars",
     description="Flex with Polars",
