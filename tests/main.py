@@ -1,7 +1,7 @@
 import json
 
 from typing import cast, Optional, Any
-from app.flex import Flex
+from ..src.flex import Flex
 from datetime import datetime
 
 
