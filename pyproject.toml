@@ -4,12 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flex"
+version = "0.1.0"
 description = "Flex with Polars"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 keywords = ["module", "namespace"]
 authors = [{ name = "Gino D. (@zinosaure)", email = "zinosaure@outlook.com" }]
+dependencies = ["polars"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Programming Language :: Python",
@@ -19,8 +21,6 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
     "Typing :: Typed",
 ]
-dependencies = ["polars"]
-version = "0.1.0"
 
 [project.urls]
 Documentation = "https://github.com/zinosaure/flex-polars#readme"
