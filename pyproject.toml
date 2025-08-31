@@ -27,7 +27,7 @@ Issues = "https://github.com/zinosaure/flex-polars/issues"
 Source = "https://github.com/zinosaure/flex-polars"
 
 [tool.hatch.build]
-sources = ["src/package"]
+sources = ["src"]
 include = ["*.py", "*.typed"]
 exclude = ["tests"]
 
