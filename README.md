@@ -110,7 +110,7 @@ See the [examples](examples) directory on GitHub for example scripts. These can 
 Install from github for the latest changes:
 
 ```
-pip install git+https://github.com/zinosaure/flex.git
+pip install git+https://github.com/zinosaure/flex-polars.git@main
 ```
 
 # Security

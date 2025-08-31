@@ -61,7 +61,7 @@ profile = Profile()
 
 def x(table: Flex.Flextable.DataFrame) -> Flex.Flextable.DataFrame:
     # table = table.filter(profile.c.name.str.starts_with("Jo"))
-    table = table.sort("id", descending=True)
+    table = table.sort("id", descending=False)
 
     return table
 
