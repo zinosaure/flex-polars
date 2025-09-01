@@ -1,1 +1,1 @@
-from .core import Flex, Flexmeta, Flextable, Flexselect, pl
+from .core import Flex, Flexmeta, Flexmodel, Flexobject, Flexselect, pl
