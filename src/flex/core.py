@@ -211,7 +211,7 @@ class Flexmodel(
         self.__object__: Flexobject = Flexobject(self)
 
     @staticmethod
-    def load(id: int) -> Optional["Flexmodel"]:
+    def load(id: int) -> Optional[Flexheritage]:
         """
         Example how to implement this static method.
         --------
@@ -222,16 +222,16 @@ class Flexmodel(
         """
 
         raise NotImplementedError(
-            'Static method "load(id: int) -> Optional["Flexmodel"]" is not yet implemented!'
+            'Static method "load(id: int) -> Optional[Flexheritage]" is not yet implemented!'
         )
 
-    def _load(self, id: int) -> Optional["Flexmodel"]:
+    def _load(self, id: int) -> Optional[Flexheritage]:
         if items := self.__meta__.load(id):
             return self.object.update(items)
 
     def clone(
         self, items: dict[str, Any] = {}, args_init: dict[str, Any] = {}
-    ) -> "Flexmodel":
+    ) -> Flexheritage:
         """
         Example how to re-implement this method.
         --------
@@ -241,7 +241,7 @@ class Flexmodel(
         """
 
         if (model := type(self)(**args_init)) and items:
-            model.object.update(items)
+            return model.object.update(items)
 
         return model
 
@@ -287,12 +287,14 @@ class Flexobject(Flexheritage):
 
         self.__model__.__dict__[name] = item
 
-    def update(self, items: dict[str, Any]):
+    def update(self, items: dict[str, Any]) -> Flexheritage:
         items = self.__model__.on_update(items)
 
         for name, _ in self.__model__.__dict__.items():
             if name not in self.RESERVED_KEYWORDS and name in items:
                 self.__setitem__(name, items[name])
+
+        return self.__model__
 
     def takeout(self, safe_mode: bool = False) -> dict[str, Any]:
         items: dict[str, Any] = {}
