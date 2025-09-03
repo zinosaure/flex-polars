@@ -7,31 +7,36 @@ from datetime import datetime
 from typing import Any, Generator, Optional, Callable, TypeAlias, Union
 
 
+def create_df(
+    data: list[dict[str, Any]], schema: Optional[dict[str, Any]] = None
+) -> pl.DataFrame:
+    return pl.DataFrame(
+        data, schema_overrides=schema, orient="row", strict=False, nan_to_null=True
+    )
+
+
+def read_as_ndjson():
+    pass
+
+
+def write_as_ndjson():
+    pass
+
+
 class Flexmeta:
     FLEXSTORE_PATH: Path = Path("/app/src/flexstore")
 
     def __init__(self, name: str, id: int = 0, schema: Optional[dict[str, Any]] = None):
         name = os.path.basename(name.replace("/", "_").lower())
         self.schema: Optional[dict[str, Any]] = schema
-        self.content: pl.DataFrame = pl.DataFrame(
-            [],
-            schema_overrides=self.schema,
-            orient="row",
-            strict=False,
-            nan_to_null=True,
-        )
+        self.content: pl.DataFrame = create_df([])
         self.metadata: dict[str, Any] = {
             "id": id,
             "datatime": datetime.now().isoformat(),
         }
-        self.fn_items: Path = Flexmeta.FLEXSTORE_PATH / Path(f"{name}.items.ndjson")
-        self.fn_metadata: Path = Flexmeta.FLEXSTORE_PATH / Path(f"{name}.metadata.json")
+        self.filename: Path = Flexmeta.FLEXSTORE_PATH / Path(f"{name}.json")
 
-        if os.path.exists(self.fn_metadata):
-            with open(self.fn_metadata, "rb") as fp:
-                self.metadata = json.load(fp)
-
-        if not (is_init := os.path.exists(self.fn_items)):
+        if not (is_init := os.path.exists(self.filename)):
             if not os.path.isdir(Flexmeta.FLEXSTORE_PATH):
                 os.umask(0)
                 os.makedirs(Flexmeta.FLEXSTORE_PATH, mode=0o777, exist_ok=True)
@@ -39,12 +44,10 @@ class Flexmeta:
             self.save_database()
 
         if is_init and self.content.is_empty():
-            self.content = pl.read_ndjson(
-                self.fn_items,
-                schema_overrides=self.schema,
-                low_memory=True,
-                ignore_errors=False,
-            )
+            with open(self.filename, "rb") as handler:
+                data = json.load(handler)
+                self.content = create_df(data["items"], schema=self.schema)
+                self.metadata = data["metadata"]
 
     def next_id(self) -> int:
         return self.metadata["id"] + 1
@@ -96,18 +99,25 @@ class Flexmeta:
         return False
 
     def save_database(self) -> bool:
+        # TODO: save and load metadata (from sperate file.)
+        # TODO: to_dicts and write_as_ndjson
         try:
-            metadata: dict[str, Any] = {
-                "id": self.next_id(),
-                "datatime": datetime.now().isoformat(),
+            self.metadata["id"] = self.next_id()
+            data = {
+                "metadata": {
+                    "id": self.metadata["id"],
+                    "count": self.count(),
+                    "datetime": datetime.now().isoformat(),
+                },
+                "items": self.content.to_dicts(),
             }
-            self.content.write_ndjson(self.fn_items)
-
-            with open(self.fn_metadata, "w+") as fp:
-                return fp.write(json.dumps(metadata)) > 0
+            data = json.dumps(data)
         except Exception as e:
             print("Flexmeta.save_database:", str(e))
             return False
+
+        with open(self.filename, "w+") as fp:
+            return fp.write(data) > 0
 
 
 class Property:
@@ -290,11 +300,11 @@ class Select:
 
 Flexmeta.FLEXSTORE_PATH = Path("/app/tests/flexstore")
 
-from datetime import datetime
-
 
 class P(Property):
     def __init__(self, items: dict[str, Any] = {}):
+        from datetime import datetime
+
         super().__init__(items)
         self.uniqid: str = "252 6545"
         self.date: datetime = datetime.now()
@@ -319,7 +329,17 @@ class M(Object):
         self.mymodel: P = P()
 
 
-m = M()
-p = P()
+class Z(Object):
+    flexmeta: Flexmeta = Flexmeta("z-users", schema={"mymodel": pl.Object})
 
-print(m.commit())
+    def __init__(self):
+        super().__init__()
+        self.name = "Jahn Doe"
+        self.phone = "060136325"
+
+
+for i in range(5):
+    m = M()
+    z = Z()
+    print(z.commit())
+p = P()
