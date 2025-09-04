@@ -217,13 +217,19 @@ class Flexobject:
     def is_flexobject(self) -> bool:
         return hasattr(self, "flexmeta")
 
+    def fetch(self) -> "Flexobject":
+        if line := self.flexmeta.load(self.id):
+            self.update(line)
+
+        return self
+
     def update(self, line: dict[str, Any], struct: bool = False) -> "Flexobject":
         for name, value in self.__dict__.items():
             if name in line and value != self:
                 self.__setitem__(name, line[name])
 
             if struct and name in self.is_unstruct and isinstance(value, Flexobject):
-                self.__dict__[name] = value.load(value.id)
+                self.__dict__[name] = value.fetch()
 
         return self
 
@@ -361,7 +367,7 @@ class Profile(Flexobject):
         },
     )
     is_unstruct: list[str] = [
-       # "contact",
+        # "contact",
     ]
 
     def __init__(self):
@@ -387,5 +393,5 @@ class Profile(Flexobject):
 #     profile.location.commit()
 #     profile.commit()
 
-if profile := Profile.load(2915):
+if profile := Profile.load(2913):
     print(profile)
