@@ -1,5 +1,6 @@
 import os
 import json
+import shutil
 import polars as pl
 
 from pathlib import Path
@@ -7,339 +8,381 @@ from datetime import datetime
 from typing import Any, Generator, Optional, Callable, TypeAlias, Union
 
 
-def create_df(
-    data: list[dict[str, Any]], schema: Optional[dict[str, Any]] = None
-) -> pl.DataFrame:
-    return pl.DataFrame(
-        data, schema_overrides=schema, orient="row", strict=False, nan_to_null=True
-    )
+class Flexstore:
+    PATH: Path = Path("/app/src/flexstore")
 
-
-def read_as_ndjson():
-    pass
-
-
-def write_as_ndjson():
-    pass
-
-
-class Flexmeta:
-    FLEXSTORE_PATH: Path = Path("/app/src/flexstore")
-
-    def __init__(self, name: str, id: int = 0, schema: Optional[dict[str, Any]] = None):
-        name = os.path.basename(name.replace("/", "_").lower())
+    def __init__(self, name: str, schema: Optional[dict[str, Any]] = None):
+        self.name: str = name.replace("/", "_").lower()
         self.schema: Optional[dict[str, Any]] = schema
-        self.content: pl.DataFrame = create_df([])
-        self.metadata: dict[str, Any] = {
-            "id": id,
-            "datatime": datetime.now().isoformat(),
-        }
-        self.filename: Path = Flexmeta.FLEXSTORE_PATH / Path(f"{name}.json")
+        self.fn_lines: Path = Flexstore.PATH / Path(f"{name}.lines.json")
+        self.fn_metadata: Path = Flexstore.PATH / Path(f"{name}.metadata.json")
 
-        if not (is_init := os.path.exists(self.filename)):
-            if not os.path.isdir(Flexmeta.FLEXSTORE_PATH):
-                os.umask(0)
-                os.makedirs(Flexmeta.FLEXSTORE_PATH, mode=0o777, exist_ok=True)
+        if not os.path.isdir(Flexstore.PATH):
+            os.umask(0)
+            os.makedirs(Flexstore.PATH, mode=0o777, exist_ok=True)
 
-            self.save_database()
+    def is_exists(self) -> bool:
+        return os.path.exists(self.fn_lines) or os.path.exists(self.fn_metadata)
 
-        if is_init and self.content.is_empty():
-            with open(self.filename, "rb") as handler:
-                data = json.load(handler)
-                self.content = create_df(data["items"], schema=self.schema)
-                self.metadata = data["metadata"]
-
-    def next_id(self) -> int:
-        return self.metadata["id"] + 1
-
-    def count(self) -> int:
-        return self.content.shape[0]
-
-    def load(self, id: int) -> Optional[dict[str, Any]]:
-        if not self.content.is_empty():
-            for items in self.content.filter(pl.col.id == id).to_dicts():
-                return items
-
-    def commit(self, items: Union[dict[str, Any], list[dict[str, Any]]]) -> bool:
-        if isinstance(items, dict):
-            items = [items]
-
-        n_content: pl.DataFrame = pl.DataFrame(
-            items,
-            schema_overrides=self.schema,
-            strict=False,
+    def DataFrame(
+        self,
+        data: list[dict[str, Any]],
+        infer_length: int = 10000,
+    ) -> pl.DataFrame:
+        return pl.DataFrame(
+            data,
+            orient="row",
+            strict=True,
             nan_to_null=True,
+            schema_overrides=self.schema,
+            infer_schema_length=infer_length,
         )
 
+    def load(self, chunk_size: int = 1000) -> tuple[pl.DataFrame, dict[str, Any]]:
+        lines: pl.DataFrame = self.DataFrame([])
+        n_lines: list[dict[str, Any]] = []
+
+        for i, line in enumerate(open(self.fn_lines, "r").readlines()):
+            n_lines.append(json.loads(line))
+
+            if i % chunk_size == 0:
+                lines = pl.concat([lines, self.DataFrame(n_lines)], how="diagonal")
+                n_lines = []
+
         try:
-            self.content = pl.concat([self.content, n_content], how="diagonal")
-            self.content = self.content.unique(
-                subset=["id"], keep="last", maintain_order=True
+            lines = pl.concat([lines, self.DataFrame(n_lines)], how="diagonal")
+        except Exception:
+            print(
+                "Flexstore.load: Data type are incompatible! Maybe you have to define some columns as 'pl.Object' data type in your schema."
             )
 
-            return self.save_database()
+        return lines, self.load_metadata()
+
+    def load_metadata(self) -> dict[str, Any]:
+        with open(self.fn_metadata, "rb") as fp:
+            return json.load(fp)
+
+    # def snapshot(self):
+    #     shutil.copy(self.fn_lines, Path(f"{self.fn_lines}.backup"))
+    #     shutil.copy(self.fn_metadata, Path(f"{self.fn_metadata}.backup"))
+
+    # def rollback(self):
+    #     shutil.copy(Path(f"{self.fn_lines}.backup"), self.fn_lines)
+    #     shutil.copy(Path(f"{self.fn_metadata}.backup"), self.fn_metadata)
+
+    def save(self, lines: pl.DataFrame, metadata: dict[str, Any]) -> bool:
+        # self.snapshot()
+
+        try:
+            with open(self.fn_lines, "w+") as fp:
+                fp.write("\n".join(map(json.dumps, lines.to_dicts())))
+
+            with open(self.fn_metadata, "w+") as fp:
+                return fp.write(json.dumps(metadata)) > 0
         except Exception as e:
-            print("Flexmeta.commit:", str(e))
-            return False
-
-    def delete(self, ident: Union[int, list[int]]) -> bool:
-        if self.content.is_empty():
-            return False
-
-        n = self.content.shape[0]
-
-        if not isinstance(ident, list):
-            self.content = self.content.remove(pl.col.id == ident)
-        else:
-            self.content = self.content.remove(pl.col.id.is_in(ident))
-
-        if n > self.content.shape[0]:
-            return self.save_database()
+            # self.rollback()
+            print("Flexstore.save:", str(e))
 
         return False
 
-    def save_database(self) -> bool:
-        # TODO: save and load metadata (from sperate file.)
-        # TODO: to_dicts and write_as_ndjson
+
+class Flexmeta:
+    def __init__(self, name: str, schema: Optional[dict[str, Any]] = None, id: int = 0):
+        self.flexstore: Flexstore = Flexstore(name, schema)
+        self.lines: pl.DataFrame = self.flexstore.DataFrame([])
+        self.metadata: dict[str, Any] = {
+            "id": id,
+            "count": 0,
+            "datatime": datetime.now().isoformat(),
+        }
+
+        if not self.flexstore.is_exists():
+            self.flexstore.save(self.lines, self.metadata)
+
+        if self.lines.is_empty():
+            self.lines, self.metadata = self.flexstore.load()
+
+    def next_id(self) -> int:
+        self.metadata["id"] += 1
+
+        return self.metadata["id"]
+
+    def count(self) -> int:
+        return self.lines.shape[0]
+
+    def load(self, id: int) -> Optional[dict[str, Any]]:
+        if not self.lines.is_empty():
+            for line in self.lines.filter(pl.col.id == id).to_dicts():
+                return line
+
+    def commit(self, line: Union[dict[str, Any], list[dict[str, Any]]]) -> bool:
+        if isinstance(line, dict):
+            line = [line]
+
+        n_lines: pl.DataFrame = self.flexstore.DataFrame(line)
+
         try:
-            self.metadata["id"] = self.next_id()
-            data = {
-                "metadata": {
-                    "id": self.metadata["id"],
-                    "count": self.count(),
-                    "datetime": datetime.now().isoformat(),
-                },
-                "items": self.content.to_dicts(),
-            }
-            data = json.dumps(data)
-        except Exception as e:
-            print("Flexmeta.save_database:", str(e))
+            self.lines = pl.concat([self.lines, n_lines], how="diagonal")
+            self.lines = self.lines.unique(
+                subset=["id"], keep="last", maintain_order=True
+            )
+            self.metadata["count"] = self.lines.shape[0]
+            self.metadata["datetime"] = datetime.now().isoformat()
+
+            return self.flexstore.save(self.lines, self.metadata)
+        except Exception:
+            print(
+                "Flexstore.commit: Data type are incompatible! Maybe you have to define some columns as 'pl.Object' data type in your schema."
+            )
             return False
 
-        with open(self.filename, "w+") as fp:
-            return fp.write(data) > 0
+    def delete(self, ident: Union[int, list[int]]) -> bool:
+        if self.lines.is_empty():
+            return False
+
+        n = self.lines.shape[0]
+
+        if not isinstance(ident, list):
+            self.lines = self.lines.remove(pl.col.id == ident)
+        else:
+            self.lines = self.lines.remove(pl.col.id.is_in(ident))
+
+        if n > self.lines.shape[0]:
+            return self.flexstore.save(self.lines, self.metadata)
+
+        return False
+
+    class Exception(Exception):
+        def __init__(self, classname: str):
+            super().__init__(
+                f"This object is not defined as a Flexmeta's Object! First implement: `flexmeta: Flexmeta = Flexmeta(...)` as a static variable in '{classname}' class."
+            )
 
 
-class Property:
+class Flexobject:
+    flexmeta: Flexmeta
+
     @classmethod
-    def clone(cls, items: dict[str, Any] = {}) -> "Property":
-        return cls().update(items)
+    def clone(cls, line: dict[str, Any] = {}) -> "Flexobject":
+        return cls().update(line)
 
-    def __init__(self, items: dict[str, Any] = {}):
-        for name, value in items.items():
-            self.__setitem__(name, value)
+    @classmethod
+    def load(cls, id: int) -> Optional["Flexobject"]:
+        if not hasattr(cls, "flexmeta"):
+            raise Flexmeta.Exception(cls.__name__)
+
+        if line := cls.flexmeta.load(id):
+            return cls.clone(line)
+
+    @classmethod
+    def batch_commit(cls, objects: list["Flexobject"]) -> bool:
+        if not hasattr(cls, "flexmeta"):
+            raise Flexmeta.Exception(cls.__name__)
+
+        if not len(objects):
+            return False
+
+        return cls.flexmeta.commit(
+            [object.takeout() for object in objects if object.flexmeta == cls.flexmeta]
+        )
+
+    @classmethod
+    def batch_delete(cls, objects: list["Flexobject"]) -> bool:
+        if not hasattr(cls, "flexmeta"):
+            raise Flexmeta.Exception(cls.__name__)
+
+        if not len(objects):
+            return False
+
+        return cls.flexmeta.delete(
+            [object.id for object in objects if object.flexmeta == cls.flexmeta]
+        )
+
+    def __init__(self):
+        if self.is_flexobject():
+            self.id: int = self.flexmeta.next_id()
+
+    def __str__(self) -> str:
+        return self.json()
 
     def __getitem__(self, name: str) -> Any:
         if name not in self.__dict__:
             raise AttributeError()
 
-        if isinstance(item := self.__dict__[name], dict):
-            return item
-        elif isinstance(item, Property):
-            return item.takeout()
+        if isinstance(line := self.__dict__[name], dict):
+            return line
+        elif isinstance(line, Flexobject):
+            return line.takeout()
 
-        return item
+        return line
 
     def __setitem__(self, name: str, value: Any):
         if name not in self.__dict__:
             raise AttributeError()
 
-        if type(item := self.__dict__[name]) is type(value):
+        if type(line := self.__dict__[name]) is type(value):
             self.__dict__[name] = value
-        elif isinstance(item, Property) and isinstance(value, dict):
-            self.__dict__[name] = item.update(value)
+        elif isinstance(line, Flexobject) and isinstance(value, dict):
+            self.__dict__[name] = line.update(value)
 
-    def __str__(self) -> str:
-        return self.json()
+    def is_flexobject(self) -> bool:
+        return hasattr(self, "flexmeta")
 
-    def update(self, items: dict[str, Any]) -> "Property":
+    def update(self, line: dict[str, Any]) -> "Flexobject":
         for name, value in self.__dict__.items():
-            if name in items and value != self:
-                self.__setitem__(name, value)
+            if name in line and value != self:
+                self.__setitem__(name, line[name])
 
         return self
 
     def takeout(self) -> dict[str, Any]:
-        items: dict[str, Any] = {}
+        line: dict[str, Any] = {}
 
         for name, _ in self.__dict__.items():
-            items[name] = self.__getitem__(name)
+            line[name] = self.__getitem__(name)
 
-        return items
+        return line
 
     def json(self, indent: Optional[int] = 4) -> str:
         return json.dumps(self.takeout(), indent=indent)
 
-
-class ObjectMetaclass(type):
-    def __call__(cls, *args, **kwargs):
-        model: Object = type.__call__(cls, *args, **kwargs)
-
-        return model.__post_init__()
-
-
-class Object(Property, metaclass=ObjectMetaclass):
-    flexmeta: Flexmeta
-
-    @classmethod
-    def load(cls, id: int) -> Optional[Union[Property, "Object"]]:
-        if items := cls.flexmeta.load(id):
-            return cls.clone(items)
-
-    @classmethod
-    def batch_commit(cls, data: list["Object"]) -> bool:
-        if not len(data):
-            return False
-
-        return cls.flexmeta.commit(
-            [model.takeout() for model in data if model.flexmeta == cls.flexmeta]
-        )
-
-    @classmethod
-    def batch_delete(cls, data: list["Object"]) -> bool:
-        if not len(data):
-            return False
-
-        return cls.flexmeta.delete(
-            [model.id for model in data if model.flexmeta == cls.flexmeta]
-        )
-
-    def __init__(self):
-        self.id: int = self.flexmeta.next_id()
-
-    def __post_init__(self) -> "Object":
-        if not hasattr(self, "flexmeta"):
-            raise Exception('Please add "super().__init__()" in "__init__()"!')
-
-        return self
-
     def commit(self) -> bool:
+        if not self.is_flexobject():
+            raise Flexmeta.Exception(self.__class__.__name__)
+
         return self.flexmeta.commit(self.takeout())
 
     def delete(self) -> bool:
+        if not self.is_flexobject():
+            raise Flexmeta.Exception(self.__class__.__name__)
+
         return self.flexmeta.delete(self.id)
 
-    def update(self, items: dict[str, Any]) -> Union[Property, "Object"]:
-        return super().update(items)
+    def select(self, callback: Callable[[pl.DataFrame], pl.DataFrame]) -> "Flexselect":
+        if not self.is_flexobject():
+            raise Flexmeta.Exception(self.__class__.__name__)
 
-    def takeout(self) -> dict[str, Any]:
-        return super().takeout()
-
-    def select(self, callback: Callable[[pl.DataFrame], pl.DataFrame]) -> "Select":
-        return Select(self, callback(self.flexmeta.content))
+        return Flexselect(self, callback(self.flexmeta.lines))
 
 
-class Select:
-    Callback: TypeAlias = Optional[Callable[[Property | Object], Property | Object]]
+class Flexselect:
+    Callback: TypeAlias = Optional[Callable[[Flexobject], Flexobject]]
 
-    def __init__(self, model: Object, content: pl.DataFrame) -> None:
-        self.model: Object = model
-        self.items: list[dict[str, Any]] = content.to_dicts()
+    def __init__(self, object: Flexobject, lines: pl.DataFrame) -> None:
+        self.object: Flexobject = object
+        self.lines: list[dict[str, Any]] = lines.to_dicts()
 
     def __len__(self) -> int:
-        return len(self.items)
+        return len(self.lines)
 
-    def __iter__(self) -> Generator[Property | Object, Any, None]:
-        for item in self.items:
-            yield self.model.clone(item)
+    def __iter__(self) -> Generator[Flexobject, Any, None]:
+        for item in self.lines:
+            yield self.object.clone(item)
 
     def count(self) -> int:
-        return len(self.items)
+        return len(self.lines)
 
     def map(self, callback: Callable[[dict[str, Any]], dict[str, Any]]):
-        self.items = list(map(callback, self.items))
+        self.lines = list(map(callback, self.lines))
 
-    def head(
-        self, limit: int = 10, callback: Callback = None
-    ) -> list[Property | Object]:
-        items = self.items[0:limit]
-        items = list(map(self.model.clone, items))
+    def head(self, limit: int = 10, callback: Callback = None) -> list[Flexobject]:
+        lines = list(map(self.object.clone, self.lines[0:limit]))
 
         if callable(callback):
-            return list(map(callback, items))
+            return list(map(callback, lines))
 
-        return items
+        return lines
 
-    def tail(
-        self, limit: int = 10, callback: Callback = None
-    ) -> list[Property | Object]:
-        items = self.items[-limit:]
-        items = list(map(self.model.clone, items))
+    def tail(self, limit: int = 10, callback: Callback = None) -> list[Flexobject]:
+        lines = list(map(self.object.clone, self.lines[-limit:]))
 
         if callable(callback):
-            return list(map(callback, items))
+            return list(map(callback, lines))
 
-        return items
+        return lines
 
-    def fetch_one(self, callback: Callback = None) -> Optional[Property | Object]:
-        for item in self.items:
+    def fetch_one(self, callback: Callback = None) -> Optional[Flexobject]:
+        for item in self.lines:
             if callable(callback):
-                return callback(self.model.clone(item))
+                return callback(self.object.clone(item))
 
-            return self.model.clone(item)
+            return self.object.clone(item)
 
     def fetch_all(
         self, page: int = -1, limit: int = 10, callback: Callback = None
-    ) -> list[Property | Object]:
+    ) -> list[Flexobject]:
         if page < 1 or limit < 1:
-            items = self.items
+            lines = self.lines
         else:
             paging = abs((page * limit) - limit)
-            items = self.items[paging : paging + limit]
+            lines = self.lines[paging : paging + limit]
 
-        items = list(map(self.model.clone, items))
+        lines = list(map(self.object.clone, lines))
 
         if callable(callback):
-            return list(map(callback, items))
+            return list(map(callback, lines))
 
-        return items
+        return lines
 
 
 ###
 
 
-Flexmeta.FLEXSTORE_PATH = Path("/app/tests/flexstore")
+Flexstore.PATH = Path("/app/tests/flexstore")
 
 
-class P(Property):
-    def __init__(self, items: dict[str, Any] = {}):
+class P(Flexobject):
+    def __init__(self, line: dict[str, Any] = {}):
         from datetime import datetime
 
-        super().__init__(items)
         self.uniqid: str = "252 6545"
         self.date: datetime = datetime.now()
+        self.xxsxx: int = 1000
+        self.xxx = "dd"
+        self.update(line)
 
-    def update(self, items: dict[str, Any]) -> Property:
-        items["date"] = datetime.fromisoformat(items["date"])
-        return super().update(items)
+    def update(self, line: dict[str, Any]) -> Flexobject:
+        if "date" in line:
+            line["date"] = datetime.fromisoformat(line["date"])
+
+        return super().update(line)
 
     def takeout(self) -> dict[str, Any]:
-        items = super().takeout()
-        items["date"] = self.date.isoformat()
-        return items
+        line = super().takeout()
+        line["date"] = self.date.isoformat()
+        return line
 
 
-class M(Object):
-    flexmeta: Flexmeta = Flexmeta("users", schema={"mymodel": pl.Object})
-
-    def __init__(self):
-        super().__init__()
-        self.name = "John Doe"
-        self.phone = "0601363265"
-        self.mymodel: P = P()
-
-
-class Z(Object):
-    flexmeta: Flexmeta = Flexmeta("z-users", schema={"mymodel": pl.Object})
+class Z(Flexobject):
+    flexmeta: Flexmeta = Flexmeta("z-users")
 
     def __init__(self):
         super().__init__()
         self.name = "Jahn Doe"
         self.phone = "060136325"
+        self.callphone = "060136325"
 
 
-for i in range(5):
-    m = M()
-    z = Z()
-    print(z.commit())
-p = P()
+class M(Flexobject):
+    flexmeta: Flexmeta = Flexmeta(
+        "users",
+        schema={
+            "myobject": pl.Object
+        },
+    )
+
+    def __init__(self):
+        super().__init__()
+        self.name = "John Doe"
+        self.phone = "0601363265"
+        self.myobject: P = P()
+        self.z: Z = Z()
+
+
+# for i in range(5):
+#     m = M()
+#     if i == 2:
+#         m.z.sss= "ss"
+#     print(m.id, m.commit())
+
+print(M.batch_commit([M() for _ in range(5)]))
