@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flex"
+version = "0.1.0"
+description = "Flex with Polars"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+keywords = ["module", "namespace"]
+authors = [{ name = "Gino D. (@zinosaure)", email = "zinosaure@outlook.com" }]
+dependencies = ["polars"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Documentation = "https://github.com/zinosaure/flex-polars#readme"
+Issues = "https://github.com/zinosaure/flex-polars/issues"
+Source = "https://github.com/zinosaure/flex-polars"
+
+[tool.hatch.build]
+sources = ["src"]
+include = ["*.py", "*.typed"]
+exclude = ["tests"]
+
+[tool.hatch.envs.default]
+dependencies = ["pytest", "pytest-cov"]
+
+[tool.hatch.envs.default.scripts]
+cov = "pytest --cov-report=term-missing --cov-config=pyproject.toml --cov=src --cov=tests"
+no-cov = "cov --no-cov"
+
+[[tool.hatch.envs.test.matrix]]
+python = ["312", "313"]
+
+[tool.coverage.run]
+branch = true
+parallel = true
+
+[tool.coverage.report]
+exclude_lines = ["no cov", "if __name__ == .__main__.:", "if TYPE_CHECKING:"]

@@ -1,0 +1,11 @@
+name: flex-polars
+
+services:
+    example:
+        build: .
+        image: flex-polars/example
+        container_name: flex-polars-app
+        restart: unless-stopped
+        tty: true
+        volumes:
+            - ./src:/app/src
