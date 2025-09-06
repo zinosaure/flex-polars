@@ -149,11 +149,11 @@ class Flexmeta:
 
 class Flexobject:
     flexmeta: Flexmeta
-    is_unstruct: list[str] = []
+    compacts: list[str] = []
 
     @classmethod
     def clone(cls, line: dict[str, Any] = {}) -> "Flexobject":
-        return cls().update(line, struct=True)
+        return cls().update(line)
 
     @classmethod
     def load(cls, id: int) -> Optional["Flexobject"]:
@@ -188,19 +188,20 @@ class Flexobject:
         )
 
     def __init__(self):
-        if self.is_flexobject():
+        if self.is_flexmeta():
             self.id: int = self.flexmeta.next_id()
 
     def __str__(self) -> str:
-        return self.json()
+        return self.json(compacted=False)
 
     def __getitem__(self, name: str) -> Any:
         if name not in self.__dict__:
             raise AttributeError()
 
-        if isinstance(line := self.__dict__[name], dict):
-            return line
-        elif isinstance(line, Flexobject):
+        if isinstance(line := self.__dict__[name], Flexobject):
+            if self.is_compacted(name) and line.is_flexmeta():
+                line.fetch()
+
             return line.takeout()
 
         return line
@@ -211,56 +212,62 @@ class Flexobject:
 
         if type(line := self.__dict__[name]) is type(value):
             self.__dict__[name] = value
-        elif isinstance(line, Flexobject) and isinstance(value, dict):
-            self.__dict__[name] = line.update(value)
+        elif isinstance(line, Flexobject):
+            if self.is_compacted(name) and line.is_flexmeta():
+                self.__dict__[name] = line.fetch()
+            if isinstance(value, dict):
+                self.__dict__[name] = line.update(value)
 
-    def is_flexobject(self) -> bool:
+    def is_flexmeta(self) -> bool:
         return hasattr(self, "flexmeta")
 
-    def fetch(self) -> "Flexobject":
-        if line := self.flexmeta.load(self.id):
+    def is_compacted(self, name: str) -> bool:
+        return name in self.compacts
+
+    def fetch(self, id: Optional[int] = None) -> "Flexobject":
+        if id:
+            self.id = id
+
+        if self.is_flexmeta() and (line := self.flexmeta.load(self.id)):
             self.update(line)
 
         return self
 
-    def update(self, line: dict[str, Any], struct: bool = False) -> "Flexobject":
+    def update(self, line: dict[str, Any]) -> "Flexobject":
         for name, value in self.__dict__.items():
             if name in line and value != self:
                 self.__setitem__(name, line[name])
 
-            if struct and name in self.is_unstruct and isinstance(value, Flexobject):
-                self.__dict__[name] = value.fetch()
-
         return self
 
-    def takeout(self, unstruct: bool = False) -> dict[str, Any]:
+    def takeout(self, compacted: bool = True) -> dict[str, Any]:
         line: dict[str, Any] = {}
 
         for name, value in self.__dict__.items():
-            line[name] = self.__getitem__(name)
-
-            if unstruct and name in self.is_unstruct and isinstance(value, Flexobject):
+            if compacted and self.is_compacted(name) and isinstance(value, Flexobject):
                 line[name] = {"id": value.id}
+            else:
+                line[name] = self.__getitem__(name)
 
         return line
 
-    def json(self, indent: Optional[int] = 4) -> str:
-        return json.dumps(self.takeout(), indent=indent)
+    def json(self, indent: Optional[int] = 4, compacted: bool = False) -> str:
+        return json.dumps(self.takeout(compacted), indent=indent)
 
     def commit(self) -> bool:
-        if not self.is_flexobject():
+        if not self.is_flexmeta():
             raise Flexmeta.Exception(self.__class__.__name__)
 
-        return self.flexmeta.commit(self.takeout(unstruct=True))
+        return self.flexmeta.commit(self.takeout())
 
     def delete(self) -> bool:
-        if not self.is_flexobject():
+        if not self.is_flexmeta():
             raise Flexmeta.Exception(self.__class__.__name__)
 
         return self.flexmeta.delete(self.id)
 
     def select(self, callback: Callable[[pl.DataFrame], pl.DataFrame]) -> "Flexselect":
-        if not self.is_flexobject():
+        if not self.is_flexmeta():
             raise Flexmeta.Exception(self.__class__.__name__)
 
         return Flexselect(self, callback(self.flexmeta.lines))
@@ -366,8 +373,8 @@ class Profile(Flexobject):
             "contact": pl.Object,
         },
     )
-    is_unstruct: list[str] = [
-        # "contact",
+    compacts: list[str] = [
+        "contact",
     ]
 
     def __init__(self):
@@ -393,5 +400,7 @@ class Profile(Flexobject):
 #     profile.location.commit()
 #     profile.commit()
 
-if profile := Profile.load(2913):
-    print(profile)
+# if profile := Profile.load(2913):
+profile = Profile()
+profile.contact.fetch(2908)
+print(profile.commit())
