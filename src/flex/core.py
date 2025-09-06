@@ -17,7 +17,7 @@ def protect(*protected):
             if cls.has_base:
                 for object in attrs:
                     if object in protected:
-                        raise objectError(
+                        raise AttributeError(
                             'Overriding of object "%s" not allowed.' % object
                         )
             cls.has_base = True
@@ -27,380 +27,327 @@ def protect(*protected):
     return Protect
 
 
-class Flexmeta:
-    @property
-    def metadata(self) -> dict[str, Any]:
-        return self.__metadata__
+class Flexstore:
+    PATH: Path = Path("/app/src/flexstore")
 
-    @property
-    def table(self) -> pl.DataFrame:
-        return self.__table__.clone()
+    def __init__(self, name: str, schema: Optional[dict[str, Any]] = None):
+        self.name: str = name.replace("/", "_").lower()
+        self.schema: Optional[dict[str, Any]] = schema
+        self.fn_lines: Path = Flexstore.PATH / Path(f"{name}.lines.ndjson")
+        self.fn_metadata: Path = Flexstore.PATH / Path(f"{name}.metadata.json")
 
-    @property
-    def schema(self) -> Optional[dict[str, Any]]:
-        return self.__schema__
+        if not os.path.isdir(Flexstore.PATH):
+            os.umask(0)
+            os.makedirs(Flexstore.PATH, mode=0o777, exist_ok=True)
 
-    @property
-    def content(self) -> dict[str, Any]:
-        return {
-            "metadata": {
-                "id": self.next_id(),
-                "count": self.count(),
-                "datetime": datetime.now().isoformat(),
-            },
-            "items": self.__table__.to_dicts(),
-        }
+    def is_exists(self) -> bool:
+        return os.path.exists(self.fn_lines) or os.path.exists(self.fn_metadata)
 
-    def __init__(
+    def DataFrame(
         self,
-        name: str,
-        minimum_id: int = 0,
-        schema: Optional[dict[str, Any]] = None,
-    ):
-        name = os.path.basename(name.replace("/", "_").lower())
-        self.__metadata__: dict[str, Any] = {
-            "id": minimum_id,
-            "count": 0,
-            "datetime": datetime.now().isoformat(),
-        }
-        self.__schema__: Optional[dict[str, Any]] = schema
-        self.__table__: pl.DataFrame = self.DataFrame([])
-        self.__filename__: Path = Path(Flex.FLEXSTORE_PATH / Path(f"{name}.json"))
-
-        if os.path.exists(self.__filename__):
-            with open(self.__filename__, "rb") as handler:
-                data = json.load(handler)
-                self.__metadata__ = data["metadata"]
-                # self.__table = pl.read_ndjson(
-                # StringIO(data["items"]),
-                # schema_overrides=self.__schema,
-                # low_memory=True,
-                # ignore_errors=True
-                # )
-                self.__table__ = self.DataFrame(data["items"])
-        else:
-            if not os.path.isdir(Flex.FLEXSTORE_PATH):
-                os.umask(0)
-                os.makedirs(Flex.FLEXSTORE_PATH, mode=0o777, exist_ok=True)
-
-            self.write_to_json()
-
-    def DataFrame(self, data: list[dict[str, Any]]) -> pl.DataFrame:
+        data: list[dict[str, Any]],
+        infer_length: int = 100,
+    ) -> pl.DataFrame:
         return pl.DataFrame(
             data,
-            schema_overrides=self.__schema__,
             orient="row",
-            strict=False,
+            strict=True,
             nan_to_null=True,
+            schema_overrides=self.schema,
+            infer_schema_length=infer_length,
         )
 
-    def next_id(self) -> int:
-        return self.__metadata__["id"] + 1
+    def load(self, chunk_size: int = 1000) -> tuple[pl.DataFrame, dict[str, Any]]:
+        lines: pl.DataFrame = self.DataFrame([])
+        n_lines: list[dict[str, Any]] = []
 
-    def count(self) -> int:
-        return self.__table__.shape[0]
+        for i, line in enumerate(open(self.fn_lines, "r").readlines()):
+            n_lines.append(json.loads(line))
 
-    def load(self, id: int) -> Optional[dict[str, Any]]:
-        if not self.__table__.is_empty():
-            for items in self.__table__.filter(pl.col.id == id).to_dicts():
-                return items
-
-    def commit(self, items: dict[str, Any] | list[dict[str, Any]]) -> bool:
-        if isinstance(items, list):
-            table = self.DataFrame(items)
-        else:
-            table = self.DataFrame([items])
+            if i % chunk_size == 0:
+                lines = pl.concat([lines, self.DataFrame(n_lines)], how="diagonal")
+                n_lines = []
 
         try:
-            self.__table__ = pl.concat([self.__table__, table], how="diagonal")
-            self.__table__ = self.__table__.unique(
-                subset=["id"], keep="last", maintain_order=True
+            lines = pl.concat([lines, self.DataFrame(n_lines)], how="diagonal")
+        except Exception:
+            print(
+                "Flexstore.load: Data type are incompatible! Maybe you have to define some columns as 'pl.Object' data type in your schema."
             )
 
-            return self.write_to_json()
+        return lines, self.load_metadata()
+
+    def load_metadata(self) -> dict[str, Any]:
+        with open(self.fn_metadata, "rb") as fp:
+            return json.load(fp)
+
+    def save(self, lines: pl.DataFrame, metadata: dict[str, Any]) -> bool:
+        try:
+            with open(self.fn_lines, "w+") as fp:
+                fp.write("\n".join(map(json.dumps, lines.to_dicts())))
+
+            with open(self.fn_metadata, "w+") as fp:
+                return fp.write(json.dumps(metadata)) > 0
         except Exception as e:
-            print("Flexmeta.commit:", str(e))
-            return False
-
-    def delete(self, ident: int | list[int]) -> bool:
-        if self.__table__.is_empty():
-            return False
-
-        n = self.__table__.shape[0]
-
-        if not isinstance(ident, list):
-            self.__table__ = self.__table__.remove(pl.col.id == ident)
-        else:
-            self.__table__ = self.__table__.remove(pl.col.id.is_in(ident))
-
-        if n > self.__table__.shape[0]:
-            return self.write_to_json()
+            print("Flexstore.save:", str(e))
 
         return False
 
-    def batch_commit(self, data: list["Flexmodel"]) -> bool:
-        if not len(data):
-            return False
 
-        return self.commit([model.object.takeout(safe_mode=True) for model in data])
+class Flexmeta:
+    def __init__(self, name: str, schema: Optional[dict[str, Any]] = None, id: int = 0):
+        self.flexstore: Flexstore = Flexstore(name, schema)
+        self.lines: pl.DataFrame = self.flexstore.DataFrame([])
+        self.metadata: dict[str, Any] = {
+            "id": id,
+            "count": 0,
+            "datetime": datetime.now().isoformat(),
+        }
 
-    def batch_delete(self, data: list["Flexmodel"]) -> bool:
-        if not len(data):
-            return False
+        if not self.flexstore.is_exists():
+            self.flexstore.save(self.lines, self.metadata)
 
-        return self.delete([model.id for model in data])
+        if self.lines.is_empty():
+            self.lines, self.metadata = self.flexstore.load()
 
-    def write_to_json(self) -> bool:
+    def next_id(self) -> int:
+        self.metadata["id"] += 1
+
+        return self.metadata["id"]
+
+    def count(self) -> int:
+        return self.lines.shape[0]
+
+    def load(self, id: int) -> Optional[dict[str, Any]]:
+        if not self.lines.is_empty():
+            for line in self.lines.filter(pl.col.id == id).to_dicts():
+                return line
+
+    def commit(self, line: Union[dict[str, Any], list[dict[str, Any]]]) -> bool:
+        if isinstance(line, dict):
+            line = [line]
+
+        n_lines: pl.DataFrame = self.flexstore.DataFrame(line)
+
         try:
-            data = json.dumps(self.content)
-        except Exception as e:
-            print("Flexmeta.write_to_json:", str(e))
+            self.lines = pl.concat([self.lines, n_lines], how="diagonal")
+            self.lines = self.lines.unique(
+                subset=["id"], keep="last", maintain_order=True
+            )
+            self.metadata["count"] = self.lines.shape[0]
+            self.metadata["datetime"] = datetime.now().isoformat()
+
+            return self.flexstore.save(self.lines, self.metadata)
+        except Exception:
+            print(
+                "Flexstore.commit: Data type are incompatible! Maybe you have to define some columns as 'pl.Object' data type in your schema."
+            )
             return False
 
-        with open(self.__filename__, "w+") as handler:
-            return handler.write(data) > 0
+    def delete(self, ident: Union[int, list[int]]) -> bool:
+        if self.lines.is_empty():
+            return False
+
+        n = self.lines.shape[0]
+
+        if not isinstance(ident, list):
+            self.lines = self.lines.remove(pl.col.id == ident)
+        else:
+            self.lines = self.lines.remove(pl.col.id.is_in(ident))
+
+        if n > self.lines.shape[0]:
+            return self.flexstore.save(self.lines, self.metadata)
+
+        return False
+
+    class Exception(Exception):
+        def __init__(self, classname: str):
+            super().__init__(
+                f"This object is not defined as a Flexmeta's Object! First implement: `flexmeta: Flexmeta = Flexmeta(...)` as a static variable in '{classname}' class."
+            )
 
 
-class Flexheritage:
-    def on_update(self, items: dict[str, Any]) -> dict[str, Any]:
-        return items
+class Flexobject:
+    flexmeta: Flexmeta
+    compacts: list[str] = []
 
-    def on_takeout(self, items: dict[str, Any]) -> dict[str, Any]:
-        return items
+    @classmethod
+    def clone(cls, line: dict[str, Any] = {}) -> "Flexobject":
+        return cls().update(line)
 
+    @classmethod
+    def load(cls, id: int) -> Optional["Flexobject"]:
+        if not hasattr(cls, "flexmeta"):
+            raise Flexmeta.Exception(cls.__name__)
 
-class Flexmodel(
-    Flexheritage,
-    metaclass=protect(
-        *[
-            "_load",
-            "__object__",
-            "meta",
-            "meta_table",
-            "meta_schema",
-            "column",
-            "object",
-            "select",
-        ]
-    ),
-):
-    __meta__: Flexmeta
+        if line := cls.flexmeta.load(id):
+            return cls.clone(line)
 
-    @property
-    def meta(self) -> Flexmeta:
-        return self.__meta__
+    @classmethod
+    def batch_commit(cls, objects: list["Flexobject"]) -> bool:
+        if not hasattr(cls, "flexmeta"):
+            raise Flexmeta.Exception(cls.__name__)
 
-    @property
-    def meta_table(self) -> pl.DataFrame:
-        return self.__meta__.table
+        if not len(objects):
+            return False
 
-    @property
-    def meta_schema(self) -> Optional[dict[str, Any]]:
-        return self.__meta__.schema
-
-    @property
-    def column(self) -> pl.expr.Expr:
-        return pl.col
-
-    @property
-    def object(self) -> "Flexobject":
-        return self.__object__
-
-    def __init__(self):
-        self.id: int = self.__meta__.next_id()
-        self.__object__: Flexobject = Flexobject(self)
-
-    @staticmethod
-    def load(id: int) -> Optional[Flexheritage]:
-        """
-        Example how to implement this static method.
-        --------
-
-        @staticmethod
-        def load(id: int) -> Optional["MyObject"]:
-            return cast(MyObject, MyObject()._load(id))
-        """
-
-        raise NotImplementedError(
-            'Static method "load(id: int) -> Optional[Flexheritage]" is not yet implemented!'
+        return cls.flexmeta.commit(
+            [object.takeout() for object in objects if object.flexmeta == cls.flexmeta]
         )
 
-    def _load(self, id: int) -> Optional[Flexheritage]:
-        if items := self.__meta__.load(id):
-            return self.object.update(items)
+    @classmethod
+    def batch_delete(cls, objects: list["Flexobject"]) -> bool:
+        if not hasattr(cls, "flexmeta"):
+            raise Flexmeta.Exception(cls.__name__)
 
-    def clone(
-        self, items: dict[str, Any] = {}, args_init: dict[str, Any] = {}
-    ) -> Flexheritage:
-        """
-        Example how to re-implement this method.
-        --------
+        if not len(objects):
+            return False
 
-        def clone(self, items: dict[str, Any] = {}, args_init: dict[str, Any] = {}) -> "MyObject":
-            return cast(MyObject, super().clone(items, args_init))
-        """
+        return cls.flexmeta.delete(
+            [object.id for object in objects if object.flexmeta == cls.flexmeta]
+        )
 
-        if (model := type(self)(**args_init)) and items:
-            return model.object.update(items)
-
-        return model
-
-    def commit(self) -> bool:
-        return self.__meta__.commit(self.__object__.takeout(safe_mode=True))
-
-    def delete(self) -> bool:
-        return self.__meta__.delete(self.id)
-
-    def select(self, callback: Callable[[pl.DataFrame], pl.DataFrame]) -> "Flexselect":
-        return Flexselect(callback(self.__meta__.table), self)
-
-
-class Flexobject(Flexheritage):
-    RESERVED_KEYWORDS: list[str] = ["__meta__", "__model__", "__object__"]
-
-    def __init__(self, model: Flexheritage):
-        self.__model__: Flexheritage = model
+    def __init__(self):
+        if self.is_flexmeta():
+            self.id: int = self.flexmeta.next_id()
 
     def __str__(self) -> str:
-        return self.json()
+        return self.json(compacted=False)
 
     def __getitem__(self, name: str) -> Any:
-        return self.__model__.__dict__.get(name)
+        if name not in self.__dict__:
+            raise AttributeError()
+
+        if isinstance(line := self.__dict__[name], Flexobject):
+            if self.is_compacted(name) and line.is_flexmeta():
+                line.fetch()
+
+            return line.takeout()
+
+        return line
 
     def __setitem__(self, name: str, value: Any):
-        if name not in self.__model__.__dict__:
-            return
+        if name not in self.__dict__:
+            raise AttributeError()
 
-        item = self.__model__.__dict__[name]
+        if type(line := self.__dict__[name]) is type(value):
+            self.__dict__[name] = value
+        elif isinstance(line, Flexobject):
+            if self.is_compacted(name) and line.is_flexmeta():
+                self.__dict__[name] = line.fetch()
+            if isinstance(value, dict):
+                self.__dict__[name] = line.update(value)
 
-        if type(item) is type(value):
-            item = value
-        elif isinstance(value, dict):
-            if isinstance(item, Flexobject):
-                item.update(value)
-            elif isinstance(item, Flexmodel):
-                item.object.update(value)
-            elif isinstance(item, object):
-                item.__dict__.update(value)
-        else:
-            return
+    def is_flexmeta(self) -> bool:
+        return hasattr(self, "flexmeta")
 
-        self.__model__.__dict__[name] = item
+    def is_compacted(self, name: str) -> bool:
+        return name in self.compacts
 
-    def update(self, items: dict[str, Any]) -> Flexheritage:
-        items = self.__model__.on_update(items)
+    def fetch(self, id: Optional[int] = None) -> "Flexobject":
+        if id:
+            self.id = id
 
-        for name, _ in self.__model__.__dict__.items():
-            if name not in self.RESERVED_KEYWORDS and name in items:
-                self.__setitem__(name, items[name])
+        if self.is_flexmeta() and (line := self.flexmeta.load(self.id)):
+            self.update(line)
 
-        return self.__model__
+        return self
 
-    def takeout(self, safe_mode: bool = False) -> dict[str, Any]:
-        items: dict[str, Any] = {}
+    def update(self, line: dict[str, Any]) -> "Flexobject":
+        for name, value in self.__dict__.items():
+            if name in line and value != self:
+                self.__setitem__(name, line[name])
 
-        for name, item in self.__model__.__dict__.items():
-            if name not in self.RESERVED_KEYWORDS:
-                if isinstance(item, Flexobject):
-                    items[name] = item.takeout(safe_mode)
-                elif isinstance(item, Flexmodel):
-                    items[name] = item.object.takeout(safe_mode)
-                elif isinstance(item, object) and hasattr(item, "__dict__"):
-                    items[name] = item.__dict__
-                else:
-                    items[name] = item
+        return self
 
-        if safe_mode:
-            items = self.__model__.on_takeout(items)
+    def takeout(self, compacted: bool = True) -> dict[str, Any]:
+        line: dict[str, Any] = {}
 
-        return items
+        for name, value in self.__dict__.items():
+            if compacted and self.is_compacted(name) and isinstance(value, Flexobject):
+                line[name] = {"id": value.id}
+            else:
+                line[name] = self.__getitem__(name)
 
-    def json(self, indent: Optional[int] = 4) -> str:
-        return json.dumps(self.takeout(safe_mode=True), indent=indent)
+        return line
+
+    def json(self, indent: Optional[int] = 4, compacted: bool = False) -> str:
+        return json.dumps(self.takeout(compacted), indent=indent)
+
+    def commit(self) -> bool:
+        if not self.is_flexmeta():
+            raise Flexmeta.Exception(self.__class__.__name__)
+
+        return self.flexmeta.commit(self.takeout())
+
+    def delete(self) -> bool:
+        if not self.is_flexmeta():
+            raise Flexmeta.Exception(self.__class__.__name__)
+
+        return self.flexmeta.delete(self.id)
+
+    def select(self, callback: Callable[[pl.DataFrame], pl.DataFrame]) -> "Flexselect":
+        if not self.is_flexmeta():
+            raise Flexmeta.Exception(self.__class__.__name__)
+
+        return Flexselect(self, callback(self.flexmeta.lines))
 
 
 class Flexselect:
-    Callback: TypeAlias = Optional[Callable[[Flexmodel], Flexmodel]]
+    Callback: TypeAlias = Optional[Callable[[Flexobject], Flexobject]]
 
-    def __init__(self, table: pl.DataFrame, model: Flexmodel):
-        self.__items__: list[dict[str, Any]] = table.to_dicts()
-        self.__table__: Flexmodel = model
+    def __init__(self, object: Flexobject, lines: pl.DataFrame) -> None:
+        self.object: Flexobject = object
+        self.lines: list[dict[str, Any]] = lines.to_dicts()
 
     def __len__(self) -> int:
-        return len(self.__items__)
+        return len(self.lines)
 
-    def __iter__(self) -> Generator[Flexmodel, Any, None]:
-        for item in self.__items__:
-            yield self.__table__.clone(item)  # type: ignore
+    def __iter__(self) -> Generator[Flexobject, Any, None]:
+        for item in self.lines:
+            yield self.object.clone(item)
 
     def count(self) -> int:
-        return len(self.__items__)
+        return len(self.lines)
 
     def map(self, callback: Callable[[dict[str, Any]], dict[str, Any]]):
-        self.__items__ = list(map(callback, self.__items__))
+        self.lines = list(map(callback, self.lines))
 
-    def head(self, limit: int = 10, callback: Callback = None) -> list[Flexmodel]:
-        items = self.__items__[0:limit]
-        items = list(map(self.__table__.clone, items))
-
-        if callable(callback):
-            return list(map(callback, items))
-
-        return items
-
-    def tail(self, limit: int = 10, callback: Callback = None) -> list[Flexmodel]:
-        items = self.__items__[-limit:]
-        items = list(map(self.__table__.clone, items))
+    def head(self, limit: int = 10, callback: Callback = None) -> list[Flexobject]:
+        lines = list(map(self.object.clone, self.lines[0:limit]))
 
         if callable(callback):
-            return list(map(callback, items))
+            return list(map(callback, lines))
 
-        return items
+        return lines
 
-    def fetch_one(self, callback: Callback = None) -> Optional[Flexmodel]:
-        for item in self.__items__:
+    def tail(self, limit: int = 10, callback: Callback = None) -> list[Flexobject]:
+        lines = list(map(self.object.clone, self.lines[-limit:]))
+
+        if callable(callback):
+            return list(map(callback, lines))
+
+        return lines
+
+    def fetch_one(self, callback: Callback = None) -> Optional[Flexobject]:
+        for item in self.lines:
             if callable(callback):
-                return callback(self.__table__.clone(item))
+                return callback(self.object.clone(item))
 
-            return self.__table__.clone(item)
+            return self.object.clone(item)
 
     def fetch_all(
         self, page: int = -1, limit: int = 10, callback: Callback = None
-    ) -> list[Flexmodel]:
+    ) -> list[Flexobject]:
         if page < 1 or limit < 1:
-            items = self.__items__
+            lines = self.lines
         else:
             paging = abs((page * limit) - limit)
-            items = self.__items__[paging : paging + limit]
+            lines = self.lines[paging : paging + limit]
 
-        items = list(map(self.__table__.clone, items))
+        lines = list(map(self.object.clone, lines))
 
         if callable(callback):
-            return list(map(callback, items))
+            return list(map(callback, lines))
 
-        return items
-
-
-class Flex(object):
-    Pl: TypeAlias = pl
-    DataFrame: TypeAlias = pl.DataFrame
-    FLEXSTORE_PATH: Path = Path("/app/src/flexstore")
-
-    @staticmethod
-    def setPath(store_path: Path):
-        Flex.FLEXSTORE_PATH = store_path
-
-    class Flexmeta(Flexmeta):
-        pass
-
-    class Flexmodel(Flexmodel):
-        pass
-
-
-class Ro:
-    def __init__(self, items: dict[str, Any] = {}):
-        for k, v in items.items():
-            if isinstance(v, (list, tuple)):
-                setattr(self, k, [Ro(x) if isinstance(x, dict) else x for x in v])
-            else:
-                setattr(self, k, Ro(v) if isinstance(v, dict) else v)
+        return lines
