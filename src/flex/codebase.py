@@ -222,7 +222,9 @@ class Flexobject:
 
     def update(self, items: dict[str, Any]) -> "Flexobject":
         def callback(item: Any, n_item: Any):
-            if isinstance(item, Flexobject) and isinstance(n_item, dict):
+            if item is None:
+                return n_item
+            elif isinstance(item, Flexobject) and isinstance(n_item, dict):
                 return item.clone(n_item)
             elif isinstance(item, (list, tuple)) and isinstance(n_item, (list, tuple)):
                 if not len(item):
