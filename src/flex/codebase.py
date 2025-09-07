@@ -18,9 +18,7 @@ def protect(*protected):
             if cls.has_base:
                 for object in attrs:
                     if object in protected:
-                        raise AttributeError(
-                            'Overriding of object "%s" not allowed.' % object
-                        )
+                        raise AttributeError('Overriding of object "%s" not allowed.' % object)
             cls.has_base = True
             klass = super().__new__(cls, name, bases, attrs)
             return klass
@@ -35,9 +33,7 @@ class Flexmeta:
     def setup(cls, path: str | Path):
         cls.PATH = Path(path)
 
-    def __init__(
-        self, name: str, schema: Optional[dict[str, Any]] = None, minimum_id: int = 0
-    ):
+    def __init__(self, name: str, schema: Optional[dict[str, Any]] = None, minimum_id: int = 0):
         self.name: str = name.replace("/", "_").lower()
         self.name_d: Path = self.PATH / Path(self.name)
         self.schema: Optional[dict[str, Any]] = schema
@@ -91,12 +87,8 @@ class Flexmeta:
             items = [items]
 
         try:
-            self.table = pl.concat(
-                [self.table, self.create_table(items)], how="diagonal"
-            )
-            self.table = self.table.unique(
-                subset="id", keep="last", maintain_order=True
-            )
+            self.table = pl.concat([self.table, self.create_table(items)], how="diagonal")
+            self.table = self.table.unique(subset="id", keep="last", maintain_order=True)
             self.metadata["count"] = self.table.shape[0]
             self.metadata["datetime"] = datetime.now().isoformat()
 
@@ -107,9 +99,7 @@ class Flexmeta:
             with open(self.metadata_path(), "w+") as fp:
                 return fp.write(json.dumps(self.metadata, separators=(",", ":"))) > 0
         except Exception:
-            print(
-                "Flex.update: Data type are incompatible! Maybe you have to define some columns as 'pl.Object' data type in your schema."
-            )
+            print("Flex.update: Data type are incompatible! Maybe you have to define some columns as 'pl.Object' data type in your schema.")
 
         return False
 
@@ -132,9 +122,7 @@ class Flexmeta:
         table: pl.DataFrame = self.create_table([])
         items: list[dict[str, Any]] = []
 
-        for i, filename in enumerate(
-            sorted(glob.glob(os.path.join(self.name_d, "*.item.json")))
-        ):
+        for i, filename in enumerate(sorted(glob.glob(os.path.join(self.name_d, "*.item.json")))):
             with open(filename, "rb") as fp:
                 items.append(json.load(fp))
 
@@ -182,9 +170,7 @@ class Flexobject:
         if not len(objects):
             return False
 
-        return cls.flexmeta.commit(
-            [object.takeout() for object in objects if object.flexmeta == cls.flexmeta]
-        )
+        return cls.flexmeta.commit([object.takeout() for object in objects if object.flexmeta == cls.flexmeta])
 
     @classmethod
     def batch_delete(cls, objects: list["Flexobject"]) -> bool:
@@ -194,9 +180,7 @@ class Flexobject:
         if not len(objects):
             return False
 
-        return cls.flexmeta.delete(
-            [object.id for object in objects if object.flexmeta == cls.flexmeta]
-        )
+        return cls.flexmeta.delete([object.id for object in objects if object.flexmeta == cls.flexmeta])
 
     def __init__(self):
         if self.is_flexmeta():
@@ -214,9 +198,28 @@ class Flexobject:
     def is_flexmeta(self) -> bool:
         return hasattr(self, "flexmeta")
 
-    def fetch(self) -> "Flexobject":
+    def sync(self) -> "Flexobject":
         if self.is_flexmeta() and (item := self.flexmeta.load(self.id)):
             self.update(item)
+
+        return self
+
+    def sync_all(self, commit: bool = False) -> "Flexobject":
+        def callback(item: Any):
+            if isinstance(item, Flexobject):
+                item.sync_all(commit)
+            elif isinstance(item, dict):
+                [callback(v) for _, v in item.items()]
+            elif isinstance(item, (list, tuple)):
+                [callback(v) for v in item]
+            elif isinstance(item, object) and hasattr(item, "__dict__"):
+                [callback(v) for _, v in item.__dict__.items()]
+
+        self.sync()
+        [callback(item) for _, item in self.__dict__.items()]
+
+        if commit and self.is_flexmeta():
+            self.commit()
 
         return self
 
@@ -241,7 +244,7 @@ class Flexobject:
 
                 for k, v in [(k, v) for k, v in item.items() if k in n_item]:
                     item[k] = callback(v, n_item[k])
-            elif isinstance(item, object) and isinstance(n_item, dict):
+            elif isinstance(item, object) and hasattr(item, "__dict__") and isinstance(n_item, dict):
                 for k, v in [(k, v) for k, v in item.__dict__.items() if k in n_item]:
                     item.__dict__[k] = callback(v, n_item[k])
             elif type(item) is type(n_item):
@@ -336,9 +339,7 @@ class Flexselect:
 
         return items
 
-    def fetch_one(
-        self, callback: Optional[Callable[[Flexobject], Flexobject]] = None
-    ) -> Optional[Flexobject]:
+    def fetch_one(self, callback: Optional[Callable[[Flexobject], Flexobject]] = None) -> Optional[Flexobject]:
         for data in self.items:
             if callable(callback):
                 return callback(self.object.clone(data))
