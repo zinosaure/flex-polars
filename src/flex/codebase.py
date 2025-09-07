@@ -153,7 +153,6 @@ class Flexmeta:
 
 class Flexobject:
     flexmeta: Flexmeta
-    keep_up_to_date: list[str] = []
 
     @property
     def c(self) -> pl.expr.Expr:
@@ -204,47 +203,51 @@ class Flexobject:
             self.id: int = self.flexmeta.next_id()
 
     def __str__(self) -> str:
-        return self.json(extract_all=False)
+        return self.json()
 
-    def __getitem__(self, name: str) -> Any:
-        if name not in self.__dict__:
-            raise AttributeError()
-
-        if isinstance(item := self.__dict__[name], Flexobject):
-            if self.is_to_update(name) and item.is_flexmeta():
-                item.fetch()
-
-            return item.takeout()
-        return item
+    def __getitem__(self, name: str):
+        return self.takeout().get(name)
 
     def __setitem__(self, name: str, value: Any):
-        if name not in self.__dict__:
-            raise AttributeError()
-
-        if type(item := self.__dict__[name]) is type(value):
-            self.__dict__[name] = value
-        elif isinstance(item, Flexobject):
-            if self.is_to_update(name) and item.is_flexmeta():
-                self.__dict__[name] = item.fetch()
-            if isinstance(value, dict):
-                self.__dict__[name] = item.update(value)
+        self.update({name: value})
 
     def is_flexmeta(self) -> bool:
         return hasattr(self, "flexmeta")
 
-    def is_to_update(self, name: str) -> bool:
-        return name in self.keep_up_to_date
-
-    def fetch(self, id: Optional[int] = None) -> "Flexobject":
+    def fetch(self) -> "Flexobject":
         if self.is_flexmeta() and (item := self.flexmeta.load(self.id)):
             self.update(item)
 
         return self
 
-    def update(self, item: dict[str, Any]) -> "Flexobject":
-        for name, value in self.__dict__.items():
-            if name in item and value != self:
-                self.__setitem__(name, item[name])
+    def update(self, items: dict[str, Any]) -> "Flexobject":
+        def callback(item: Any, n_item: Any):
+            if isinstance(item, Flexobject) and isinstance(n_item, dict):
+                return item.clone(n_item)
+            elif isinstance(item, (list, tuple)) and isinstance(n_item, (list, tuple)):
+                if not len(item):
+                    # item is not "type-controlled"
+                    return n_item
+
+                return [callback(item[0], v) for v in n_item]
+            elif isinstance(item, dict) and isinstance(n_item, dict):
+                if not len(item):
+                    # item is not "type-controlled"
+                    return n_item
+
+                for k, v in [(k, v) for k, v in item.items() if k in n_item]:
+                    item[k] = callback(v, n_item[k])
+            elif isinstance(item, object) and isinstance(n_item, dict):
+                for k, v in [(k, v) for k, v in item.__dict__.items() if k in n_item]:
+                    item.__dict__[k] = callback(v, n_item[k])
+            elif type(item) is type(n_item):
+                return n_item
+
+            return item
+
+        for name, item in self.__dict__.items():
+            if name in items and item != self:
+                self.__dict__[name] = callback(item, items[name])
 
         return self
 
@@ -260,19 +263,23 @@ class Flexobject:
 
         return self.flexmeta.delete(self.id)
 
-    def takeout(self, extract_all: bool = True) -> dict[str, Any]:
-        data: dict[str, Any] = {}
+    def takeout(self) -> dict[str, Any]:
+        def callback(name: str, item: Any):
+            if isinstance(item, Flexobject):
+                return item.takeout()
+            elif isinstance(item, (list, tuple)):
+                return [callback(name, v) for v in item]
+            elif isinstance(item, dict):
+                return {k: callback(name, v) for k, v in item.items()}
+            elif isinstance(item, object) and hasattr(item, "__dict__"):
+                return {k: callback(name, v) for k, v in item.__dict__.items()}
 
-        for name, item in self.__dict__.items():
-            if extract_all and self.is_to_update(name) and isinstance(item, Flexobject):
-                data[name] = {"id": item.id}
-            else:
-                data[name] = self.__getitem__(name)
+            return item
 
-        return data
+        return {k: callback(k, v) for k, v in self.__dict__.items()}
 
-    def json(self, indent: Optional[int] = 4, extract_all: bool = False) -> str:
-        return json.dumps(self.takeout(extract_all=extract_all), indent=indent)
+    def json(self, indent: Optional[int] = 4) -> str:
+        return json.dumps(self.takeout(), indent=indent)
 
     def select(self, callback: Callable[[pl.DataFrame], pl.DataFrame]) -> "Flexselect":
         if not self.is_flexmeta():
