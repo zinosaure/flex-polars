@@ -224,6 +224,8 @@ class Flexobject:
         def callback(item: Any, n_item: Any):
             if item is None:
                 return n_item
+            elif isinstance(item, datetime) and isinstance(n_item, str):
+                return datetime.fromisoformat(n_item)
             elif isinstance(item, Flexobject) and isinstance(n_item, dict):
                 return item.clone(n_item)
             elif isinstance(item, (list, tuple)) and isinstance(n_item, (list, tuple)):
@@ -267,7 +269,9 @@ class Flexobject:
 
     def takeout(self) -> dict[str, Any]:
         def callback(name: str, item: Any):
-            if isinstance(item, Flexobject):
+            if isinstance(item, datetime):
+                return item.isoformat()
+            elif isinstance(item, Flexobject):
                 return item.takeout()
             elif isinstance(item, (list, tuple)):
                 return [callback(name, v) for v in item]
